@@ -105,7 +105,15 @@ void mem_destroy (Memindex m, int len)
 /**
 The `mem_assign()` function assigns a (pointer) value to a given index. */
 
-#define mymap(len) mmap (NULL, len*sizeof (char *), PROT_READ|PROT_WRITE, MAP_PRIVATE|MAP_ANONYMOUS, -1, 0)
+static void * mymap (size_t len)
+{
+  size_t bytes = len*sizeof (char *);
+  void * p = mmap (NULL, bytes, PROT_READ|PROT_WRITE, MAP_PRIVATE|MAP_ANONYMOUS, -1, 0);
+@if defined(MADV_NOHUGEPAGE)
+  madvise (p, bytes, MADV_NOHUGEPAGE);
+@endif
+  return p;
+}
 
 #if dimension == 1
 // void mem_assign (Memindex m, int i, int len, void * b)
