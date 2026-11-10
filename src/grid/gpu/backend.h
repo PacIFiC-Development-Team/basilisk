@@ -1,6 +1,10 @@
 // fixme: for the moment only 'const int' are considered, this could be generalised
-#define IS_EXTERNAL_CONSTANT(g) ((g)->constant && (g)->type == sym_INT && !(g)->data)
 #define EXTERNAL_NAME(g) (g)->global == 2 ? "_loc_" : "", (g)->name, (g)->reduct ? "_in_" : ""
+#if _CUDA
+  #define IS_KERNEL_PARAMETER(g) (!(g)->global && (!(g)->data || ((int *)(g)->data)[0] == 1))
+#else
+  #define IS_KERNEL_PARAMETER(g) false
+#endif
 
 static char * str_append_array (char * dst, const char * list[])
 {
@@ -42,11 +46,11 @@ void gpu_cpu_sync_scalar (int i, int block, char * data, size_t field_size, Sync
 void reset_scalar (int i, int block, size_t field_size, double val);
 
 void finalize_shader (Shader * s, External * externals, External * merged,
-                      unsigned ng[2], unsigned nwg[2]);
+                      unsigned ng[3], unsigned nwg[3], int dim);
 void post_setup_shader (Shader * shader, External * externals);
 int run_shader (const Shader * shader, const RegionParameters * region);
 double gpu_reduction (size_t offset, const char op, const RegionParameters * region,
-                      GPUData * data, size_t nb);
+                      GPUData * data, size_t nb, int dim);
 char * gpu_errors (const char * errors, const char * source, char * fout,
                    const char * lang);
 

@@ -13,16 +13,23 @@ generates "computation kernels" for each [loop
 iterator](/Basilisk%20C#iterators). These kernels are then dynamically
 compiled (at runtime) by the [OpenGL Shading
 Language](https://en.wikipedia.org/wiki/OpenGL_Shading_Language)
-(GLSL) compiler which is part of the (OpenGL) graphics card driver. If
-compilation is successful, the corresponding loop is performed on the
-GPU, otherwise the CPU is used. If this hybrid GPU/CPU hybrid mode of
-operation is used, synchronisation between the GPU and CPU memory is
-necessary and is done automatically.
+(GLSL) compiler which is part of the (OpenGL) graphics card driver, or
+by the equivalent runtime compilers provided by the CUDA, HIP, OpenCL
+or Metal libraries. If compilation is successful, the corresponding
+loop is performed on the GPU, otherwise the CPU is used. If this
+hybrid GPU/CPU hybrid mode of operation is used, synchronisation
+between the GPU and CPU memory is necessary and is done automatically.
 
 OpenGL is an open standard (unlike
 e.g. [CUDA](https://en.wikipedia.org/wiki/CUDA)) and is widely
 supported by graphics cards (with the notable exception of Apple
 graphics cards and some high-end "professional" Nvidia cards).
+
+Note that this is not the only option to run on GPUs and/or other
+accelerators: there are also Basilisk backends which support
+[CUDA](/src/grid/cuda/cuda.c), [HIP](/src/grid/hip/hip.c),
+[OpenCL](/src/grid/opencl/opencl.c) and, on macOS,
+[Metal](/src/grid/metal/metal.c).
 
 ## Running on GPUs
 
@@ -52,6 +59,9 @@ which will compile and run `code.c` using the `gpu/multigrid` grid.
 Note that for all this to work properly you first need to
 [install](#installation) the Basilisk GPU libraries.
 
+Similar simple compilation targets are provided for the other drivers
+(i.e. `.cuda.tst`, `.hip.tst`, `.ocl.tst`, `.metal.tst`).
+
 ## Installation
 
 Basilisk uses the [GLFW](https://www.glfw.org/) library to configure
@@ -63,7 +73,7 @@ using
 ~~~bash
 sudo apt install libglfw3-dev
 cd $BASILISK/grid/gpu
-make
+make libgpu.a
 ~~~
 
 Note that you will also need the appropriate graphics card drivers
@@ -83,6 +93,8 @@ fast Nvidia graphics card using
 ~~~bash
 __NV_PRIME_RENDER_OFFLOAD=1 __GLX_VENDOR_LIBRARY_NAME=nvidia glxinfo -B
 ~~~
+
+See [here](#see-also) for the installation of other drivers (CUDA, HIP etc.).
 
 ## Tests
 
@@ -126,6 +138,13 @@ happens to be what is used within most `foreach` loops in Basilisk
 (this is not a coincidence...). Thus, in many cases, simple and
 efficient Basilisk code will also run transparently and efficiently on
 GPUs.
+
+Note that GLSL is only used by the OpenGL driver. CUDA kernels use a
+general C++ implementation which consequently has less restrictions
+than GLSL, as does the AMD kernel compiler. OpenCL uses a variant of
+C99, which is also less restrictive than GLSL. Generally speaking,
+writing code compatible with GLSL, as described in what follows, will
+ensure portability for all these drivers.
 
 ### GPU/CPU hybrid mode
 
@@ -285,7 +304,8 @@ function](/src/ast/macro.h#complex-return-macros).
   defined at compilation time. This means that variable/dynamical
   arrays, dynamic memory allocation (malloc etc.) and ***pointers***
   do not exist on GPUs (and in GLSL). Using any of these in a foreach
-  loop will give you a GLSL error as above.
+  loop will give you a GLSL error as above (note that these
+  restrictions can be lifted on CUDA, HIP etc. drivers).
 * Limited support for function pointers: function pointers are
   fundamentally different from memory pointers.  Basilisk includes
   limited support for function pointers i.e. what is sufficient for
@@ -301,8 +321,8 @@ implementation also has the following limitations, some of which will
 be lifted in the (not-too-distant) future. In rough order of "lifting
 priority" these are:
 
-* Only 2D Cartesian and Multigrid grids for now: 3D multigrid will
-  follow easily, quadtrees and octrees are more difficult.
+* Only 2D and 3D Cartesian and Multigrid grids for now: quadtrees and
+  octrees are more difficult.
 * The maximum size of any scalar field is limited to what can be
   indexed using a 32-bits unsigned integer i.e. 2^32^ floats or 16 GB.
 * Boundary conditions have only been implemented for 3x3 stencils.
@@ -346,6 +366,8 @@ To maximize performance, here are a few tips and observations:
 * Use [built-in profiling](/src/README.trace) to check where time is
   spent. Use the `-DTRACE=3` compilation flag to get profiling
   information at the level of foreach loops.
+* On Nvidia cards the [CUDA driver](/src/grid/cuda/cuda.c) generally
+  gives better performance, especially for large problems.
 
 ## Profiling with Nsight Compute or Nsight Systems
 
@@ -368,8 +390,10 @@ nsys-ui report*.nsys-rep
 * [Test cases on GPUs](/src/test/README#gpu-tests)
 * [GPU benchmarks](Benchmarks.md)
 * [Computation kernels](/src/ast/kernels.c)
-* [An experimental CUDA driver](/src/grid/cuda/cuda.c)
-* [An experimental HIP driver](/src/grid/cuda/hip.c)
+* [The CUDA driver](/src/grid/cuda/cuda.c)
+* [The HIP driver](/src/grid/hip/hip.c)
+* [The OpenCL driver](/src/grid/opencl/opencl.c)
+* [The (experimental) Metal driver (macOS)](/src/grid/metal/metal.c)
 
 # Implementation */
 
@@ -381,87 +405,199 @@ GPUContext_t GPUContext = {
   .current_shader = -1,
 };
 
-#if _CUDA
-#    define DEFINITIONS              \
-  "struct ivec2 { int x, y; };\n" \
-  "typedef unsigned int uint;\n" \
-  "struct vec2 { float x, y; };\n" \
-  "struct vec3 { float x, y, z; };\n" \
+#if _METAL
+
+/**
+The [Metal Shading Language](/src/grid/metal/metal.c) is a dialect of
+C++14 and is thus close to CUDA, with two important differences:
+pointers cannot be stored in `constant` buffers (so the field data are
+passed as a separate kernel argument, like in OpenCL) and variables
+declared at program scope must reside in the `constant` address space
+(this is what the `_CONST_` macro is for). */
+
+# define TYPEDEF(NAME, BODY) "struct " NAME " " BODY ";\n"
+# define CAST(NAME, BODY) NAME "{" BODY "}\n"
+# define _GLOB_PARAMS0 "device real * _data, constant struct _Ctx_ * _ctx_"
+# define DEFINITIONS                       \
+  "#include <metal_stdlib>\n"              \
+  "using namespace metal;\n"               \
+  "#pragma clang diagnostic ignored \"-Wunused-variable\"\n"           \
+  "#pragma clang diagnostic ignored \"-Wunused-function\"\n"           \
+  "#pragma clang diagnostic ignored \"-Wsign-compare\"\n"               \
+  "#define _CONST_ constant\n"             \
+  "#define tensor _bsk_tensor\n" /* 'tensor' clashes with metal::tensor */ \
+  TYPEDEF("ivec2", "{ int x, y; }")        \
+  TYPEDEF("ivec3", "{ int x, y, z; }")     \
+  TYPEDEF("vec2", "{ float x, y; }")       \
+  TYPEDEF("vec3", "{ float x, y, z; }")    \
+  TYPEDEF("vec4", "{ float r, g, b, a; }") \
+  "#define forin(type,s,list) for (int _i = 0; _i < int(sizeof(list)/sizeof(type)) - 1; _i++) { type s = list[_i];\n" \
+  "#define forin2(a,b,c,d) for (int _i = 0; _i < int(sizeof(c)/sizeof(a)) - 1; _i++)" \
+  "  { a = c[_i]; b = d[_i];\n"                                         \
+  "#define forin3(a,b,e,c,d,f) for (int _i = 0; _i < int(sizeof(c)/sizeof(a)) - 1; _i++)" \
+  "  { a = c[_i]; b = d[_i]; e = f[_i];\n"                              \
+  "#define layout(x)\n"                                                 \
+  "#define _GLOB0_ _data, _ctx_\n"                                      \
+  "#define _GLOB_ _data, _ctx_,\n"                                      \
+  "#define _GLOB_PARAMS0_ " _GLOB_PARAMS0 "\n"                          \
+  "#define _GLOB_PARAMS_ " _GLOB_PARAMS0 ",\n"                          \
+  "#define _GLOB_VAL_(x) (_ctx_->x)\n"                                  \
+  "#define _LOC_VAL_(x) (_local_.x)\n"                                  \
+  "#define __global\n"
+#elif _OPENCL
+# define TYPEDEF(NAME, BODY) "typedef struct " BODY " " NAME ";\n"
+# define CAST(NAME, BODY) "(" NAME "){" BODY "}\n"
+# define _GLOB_PARAMS0 "__global real * _data, __constant struct _Ctx_ *_ctx_"
+# define DEFINITIONS                       \
+  "#define bool int\n"                     \
+  TYPEDEF("ivec2", "{ int x, y; }")        \
+  TYPEDEF("ivec3", "{ int x, y, z; }")     \
+  TYPEDEF("vec2", "{ float x, y; }")       \
+  TYPEDEF("vec3", "{ float x, y, z; }")    \
+  "#define forin(type,s,list) for (int _i = 0; _i < sizeof(list)/sizeof(type) - 1; _i++) { type s = list[_i];\n" \
+  "#define forin2(a,b,c,d) for (int _i = 0; _i < sizeof(c)/sizeof(a) - 1; _i++)" \
+  "  { a = c[_i]; b = d[_i];\n"                                         \
+  "#define forin3(a,b,e,c,d,f) for (int _i = 0; _i < sizeof(c)/sizeof(a) - 1; _i++)" \
+  "  { a = c[_i]; b = d[_i]; e = f[_i];\n"                              \
+  "#define layout(x)\n"                                                 \
+  "#define _GLOB0_ _data, _ctx_\n"                                      \
+  "#define _GLOB_ _data, _ctx_,\n"                                      \
+  "#define _GLOB_PARAMS0_ " _GLOB_PARAMS0 "\n"                          \
+  "#define _GLOB_PARAMS_ " _GLOB_PARAMS0 ",\n"                          \
+  "#define _GLOB_VAL_(x) (_ctx_->x)\n"            \
+  "#define _LOC_VAL_(x) (_local_.x)\n"                 \
+  "#define _CONST_ const\n"
+#elif _CUDA
+# define TYPEDEF(NAME, BODY) "struct " NAME " " BODY ";\n"
+# define CAST(NAME, BODY) NAME "{" BODY "}\n"
+# define _GLOB_PARAMS0 "const struct _Ctx_ *_ctx_"
+# define DEFINITIONS                       \
+  "typedef unsigned int uint;\n"           \
+  TYPEDEF("ivec2", "{ int x, y; }")        \
+  TYPEDEF("ivec3", "{ int x, y, z; }")     \
+  TYPEDEF("vec2", "{ float x, y; }")       \
+  TYPEDEF("vec3", "{ float x, y, z; }")    \
   "__host__ __device__ inline int clamp(int x, int a, int b) { return max(a, min(x, b)); }\n" \
   "#define forin(type,s,list) for (int _i = 0; _i < sizeof(list)/sizeof(type) - 1; _i++) { type s = list[_i];\n" \
   "#define forin2(a,b,c,d) for (int _i = 0; _i < sizeof(c)/sizeof(a) - 1; _i++)" \
   "  { a = c[_i]; b = d[_i];\n"                                         \
   "#define forin3(a,b,e,c,d,f) for (int _i = 0; _i < sizeof(c)/sizeof(a) - 1; _i++)" \
   "  { a = c[_i]; b = d[_i]; e = f[_i];\n"                              \
-  "#define layout(x)\n"
-#else // !_CUDA
-#  define DEFINITIONS                                                   \
+  "#define layout(x)\n"                                                 \
+  "#define _GLOB0_ _ctx_\n"                                             \
+  "#define _GLOB_ _ctx_,\n"                                             \
+  "#define _GLOB_PARAMS0_ " _GLOB_PARAMS0 "\n"                          \
+  "#define _GLOB_PARAMS_ " _GLOB_PARAMS0 ",\n"                          \
+  "#define _GLOB_VAL_(x) (_ctx_->x)\n"                                  \
+  "#define _LOC_VAL_(x) (_local_.x)\n"                                  \
+  "#define __global\n"                                                  \
+  "#define _CONST_ const\n"                                            \
+  "#define fabs(x) abs(x)\n"
+#else // GLSL
+# define TYPEDEF(NAME, BODY) "struct " NAME " " BODY ";\n"
+# define CAST(NAME, BODY) NAME "(" BODY ")\n"
+# define DEFINITIONS                                                    \
   "#define forin(type,s,list) for (int _i = 0; _i < list.length() - 1; _i++) { type s = list[_i];\n" \
   "#define forin2(a,b,c,d) for (int _i = 0; _i < c.length() - 1; _i++)" \
   "  { a = c[_i]; b = d[_i];\n"                                         \
   "#define forin3(a,b,e,c,d,f) for (int _i = 0; _i < c.length() - 1; _i++)" \
-  "  { a = c[_i]; b = d[_i]; e = f[_i];\n"
-#endif // !_CUDA
+  "  { a = c[_i]; b = d[_i]; e = f[_i];\n"                              \
+  "#define _GLOB0_\n"                                                   \
+  "#define _GLOB_\n"                                                    \
+  "#define _GLOB_PARAMS0_\n"                                            \
+  "#define _GLOB_PARAMS_\n"                                             \
+  "#define _GLOB_VAL_(x) x\n"                                           \
+  "#define _LOC_VAL_(x) (x)\n"                                          \
+  "#define _CONST_ const\n"                                            \
+  "#define fabs(x) abs(x)\n"
+#endif // GLSL
+
+#if SINGLE_PRECISION
+# define GPU_REAL_TYPE "float"
+# define GPU_COORD2_TYPE "vec2"
+# define GPU_COORD3_TYPE "vec3"
+# define GPU_MATH_DECLS
+#else // DOUBLE_PRECISION
+# define GPU_REAL_TYPE "double"
+# define GPU_COORD2_TYPE "dvec2"
+# define GPU_COORD3_TYPE "dvec3"
+# define GPU_MATH_DECLS                                             \
+  "#define cos(x) cos(float(x))\n"                                  \
+  "#define sin(x) sin(float(x))\n"                                  \
+  "#define exp(x) exp(float(x))\n"                                  \
+  "#define pow(x,y) pow(float(x), float(y))\n"
+#endif
+
+#if dimension == 2
+# define GPU_IVEC_TYPE "ivec2"
+# define GPU_DIM_COORD_TYPE GPU_COORD2_TYPE
+# define GPU_VECTOR_BODY "{ scalar x, y; }"
+# define GPU_TENSOR_BODY "{ vector x, y; }"
+# define GPU_POINT_INDICES "int i, j, level;"
+# define GPU_NEIGHBOR_INDICES "point.i+_i,point.j+_j,point.level,point.n"
+# define GPU_ORIGIN_INIT "{0,0}"
+# define GPU_UNUSED_COORDS "_CONST_ real z = 0.;\n"
+#elif dimension == 3
+# define GPU_IVEC_TYPE "ivec3"
+# define GPU_DIM_COORD_TYPE GPU_COORD3_TYPE
+# define GPU_VECTOR_BODY "{ scalar x, y, z; }"
+# define GPU_TENSOR_BODY "{ vector x, y, z; }"
+# define GPU_POINT_INDICES "int i, j, k, level;"
+# define GPU_NEIGHBOR_INDICES "point.i+_i,point.j+_j,point.k+_k,point.level,point.n"
+# define GPU_ORIGIN_INIT "{0,0,0}"
+# define GPU_UNUSED_COORDS
+#endif
+
+#if MULTIGRID
+# define DIMDECL " ivec n;"
+#else
+# define DIMDECL " uint n;"
+#endif
+
+#if LAYERS
+# define LAYERSDECL " int l;"
+# define GPU_POINT_LAYER ",point.l"
+# define GPU_INDEX_DECL                                               \
+  "#define _index(a,m) ((a).i + (point.l + _GLOB_VAL_(_layer) + (m) < _attr(a,block) ? " \
+  "point.l + _GLOB_VAL_(_layer) + (m) : 0))\n"
+#else
+# define LAYERSDECL
+# define GPU_POINT_LAYER
+# define GPU_INDEX_DECL "#define _index(a,m) ((a).i)\n"
+#endif
+
+#define GPU_TYPE_DECLS                                                \
+  "#define real " GPU_REAL_TYPE "\n"                                  \
+  "#define coord " GPU_COORD3_TYPE "\n"                               \
+  "#define _coord " GPU_DIM_COORD_TYPE "\n"                           \
+  "#define ivec " GPU_IVEC_TYPE "\n"                                  \
+  GPU_MATH_DECLS                                                      \
+  TYPEDEF("scalar", "{ int i, index; }")                              \
+  TYPEDEF("vector", GPU_VECTOR_BODY)                                  \
+  TYPEDEF("tensor", GPU_TENSOR_BODY)                                  \
+  TYPEDEF("Point", "{ " GPU_POINT_INDICES DIMDECL LAYERSDECL "}")
+
+#define GPU_NEIGHBOR_DECL                                             \
+  "#define neighborp(_i,_j,_k) " CAST("Point", GPU_NEIGHBOR_INDICES GPU_POINT_LAYER)
+
+#if _CUDA
+# define GPU_UNIFORM_DECLS
+#else
+# define GPU_UNIFORM_DECLS                                             \
+  "layout (location = 0) uniform ivec csOrigin = " GPU_ORIGIN_INIT ";\n" \
+  "layout (location = 1) uniform vec2 vsOrigin = {0.f,0.f};\n"       \
+  "layout (location = 2) uniform vec2 vsScale = {1.f,1.f};\n"
+#endif
 
 const char glsl_preproc[] =
   "// #line " xstr(LINENO) " " __FILE__ "\n"
-#if _CUDA
-#if _HIP_AMD
-  "#define uniform __device__\n"
-#else
-  "#define uniform __constant__\n"
-#endif
-#endif
   DEFINITIONS
-#if _CUDA
-  "#define neighborp(_i,_j,_k) Point{point.i+_i,point.j+_j,point.level,point.n"
-#if LAYERS
-  ",point.l"
-#endif
-  "}\n"
-#else // !CUDA
-  "#define neighborp(_i,_j,_k) Point(point.i+_i,point.j+_j,point.level,point.n"
-#if LAYERS
-  ",point.l"
-#endif
-  ")\n"
-#endif // !_CUDA
+  GPU_NEIGHBOR_DECL
   "#define dimensional(x)\n"
   "#define fmin(a,b) min(a,b)\n"
   "#define fmax(a,b) max(a,b)\n"
-#if !SINGLE_PRECISION
-  "#define real double\n"
-  "#define coord dvec3\n"
-#else // !SINGLE_PRECISION
-  "#define real float\n"
-  "#define coord vec3\n"
-#endif // !SINGLE_PRECISION
-  "#define ivec ivec2\n"
-  "struct scalar { int i, index; };\n"
-#if dimension == 2
-#if SINGLE_PRECISION
-  "#define _coord vec2\n"
-#else
-  "#define coord dvec2\n"
-  "#define cos(x) cos(float(x))\n"
-  "#define sin(x) sin(float(x))\n"
-  "#define exp(x) exp(float(x))\n"
-  "#define pow(x,y) pow(float(x), float(y))\n"
-#endif
-  "struct vector { scalar x, y; };\n"
-  "struct tensor { vector x, y; };\n"
-#endif // dimension == 2
+  GPU_TYPE_DECLS
   "#define GHOSTS " xstr(GHOSTS) "\n"
-  "struct Point { int i, j, level;"
-#if MULTIGRID
-  " ivec2 n;"
-#else
-  " uint n;"
-#endif
-#if LAYERS
-  " int l;"
-#endif
-  "};\n"
   "#define field_size() _field_size\n"
   "#define ast_pointer(x) (x)\n"
   GPU_CODE()
@@ -475,23 +611,111 @@ const char glsl_preproc[] =
   "#define val_diagonal(s,i,j,k) real((i) == 0 && (j) == 0 && (k) == 0)\n"
   "#define _attr(s,member) (_attr[(s).index].member)\n"
   "#define endforin() }\n"
-#if LAYERS
-  "#define _index(a,m) ((a).i + (point.l + _layer + (m) < _attr(a,block) ? point.l + _layer + (m) : 0))\n"
-#else
-  "#define _index(a,m) ((a).i)\n"
-#endif
+  GPU_INDEX_DECL
   "#define endforin2() }\n"
   "#define endforin3() }\n"
   "#define NOT_UNUSED(x)\n"
   "#define pi 3.14159265359f\n"
   "#define nodata (1e30f)\n"
-  "#define fabs(x) abs(x)\n"
-  "const real z = 0.;\n"
-  "const int ig = 0, jg = 0;\n"
-  "layout (location = 0) uniform ivec2 csOrigin = {0,0};\n"
-  "layout (location = 1) uniform vec2 vsOrigin = {0.f,0.f};\n"
-  "layout (location = 2) uniform vec2 vsScale = {1.f,1.f};\n"
+  GPU_UNUSED_COORDS
+  "_CONST_ int ig = 0, jg = 0, kg = 0;\n"
+  GPU_UNIFORM_DECLS
   ;
+
+#undef GPU_REAL_TYPE
+#undef GPU_COORD2_TYPE
+#undef GPU_COORD3_TYPE
+#undef GPU_MATH_DECLS
+#undef GPU_IVEC_TYPE
+#undef GPU_DIM_COORD_TYPE
+#undef GPU_VECTOR_BODY
+#undef GPU_TENSOR_BODY
+#undef GPU_POINT_INDICES
+#undef GPU_NEIGHBOR_INDICES
+#undef GPU_ORIGIN_INIT
+#undef GPU_UNUSED_COORDS
+#undef GPU_POINT_LAYER
+#undef GPU_INDEX_DECL
+#undef GPU_TYPE_DECLS
+#undef GPU_NEIGHBOR_DECL
+#undef GPU_UNIFORM_DECLS
+
+#if _METAL
+
+/**
+Metal requires an explicit address space qualifier for the pointer
+parameters of *any* function (not just kernels). Any pointer passed to
+a function generated by the Basilisk preprocessor points to a local
+variable of the calling kernel i.e. to the `thread` address space.
+
+This adds the `thread` qualifier to each parameter of the function
+definition in *code* which is a pointer. */
+
+static char * metal_thread_qualifiers (const char * code)
+{
+  const char * nl = strchr (code, '\n');
+  const char * open = nl ? strchr (nl, '(') : NULL;
+  if (!open)
+    return str_append (NULL, code);
+
+  const char * close = open;
+  int depth = 0;
+  while (*close) {
+    if (*close == '(') depth++;
+    else if (*close == ')' && !--depth) break;
+    close++;
+  }
+  if (!*close)
+    return str_append (NULL, code);
+
+  int ncommas = 1;
+  for (const char * q = open; q < close; q++)
+    if (*q == ',') ncommas++;
+  char * out = sysmalloc (strlen (code) + 7*ncommas + 1), * o = out;
+
+  const char * p = code;
+  while (p <= open) *o++ = *p++;
+  const char * start = p;
+  depth = 0;
+  for (const char * q = p; q <= close; q++) {
+    if (q == close || (*q == ',' && !depth)) {
+      const char * a = start;
+      while (a < q && strchr (" \t\n", *a)) a++;
+
+      /**
+      The `_GLOB_PARAMS_` macro expands to several kernel arguments
+      which already carry their own address space qualifiers. */
+
+      for (const char ** m = (const char *[]){ "_GLOB_PARAMS_", "_GLOB_PARAMS0_", NULL };
+	   *m; m++) {
+	size_t len = strlen (*m);
+	if ((size_t)(q - a) >= len && !strncmp (a, *m, len)) {
+	  a += len;
+	  while (a < q && strchr (" \t\n", *a)) a++;
+	  break;
+	}
+      }
+
+      bool pointer = false;
+      for (const char * b = a; b < q; b++)
+	if (*b == '*') pointer = true;
+      while (start < a) *o++ = *start++;
+      if (pointer) {
+	strcpy (o, "thread "); o += 7;
+      }
+      while (start < q) *o++ = *start++;
+      if (q == close) break;
+      *o++ = *q;
+      start = q + 1;
+    }
+    else if (*q == '(') depth++;
+    else if (*q == ')') depth--;
+  }
+  while (*close) *o++ = *close++;
+  *o = '\0';
+  return out;
+}
+#endif // _METAL
 
 static inline int list_size (const External * i)
 {
@@ -536,6 +760,10 @@ static char * write_vector (char * fs, vector v)
   fs = write_scalar (fs, v.x);
   fs = str_append (fs, ",");
   fs = write_scalar (fs, v.y);
+#if dimension == 3
+  fs = str_append (fs, ",");
+  fs = write_scalar (fs, v.z);
+#endif
   fs = str_append (fs, "}");
   return fs;
 }
@@ -546,35 +774,74 @@ static char * write_tensor (char * fs, tensor t)
   fs = write_vector (fs, t.x);
   fs = str_append (fs, ",");
   fs = write_vector (fs, t.y);
+#if dimension == 3
+  fs = str_append (fs, ",");
+  fs = write_vector (fs, t.z);
+#endif
   fs = str_append (fs, "}");
   return fs;
 }
 
 static scalar * apply_bc_list;
 
-static int bc_period_x = -1, bc_period_y = -1;
+static const int bc_period_x = -1, bc_period_y = -1;
+#if dimension == 3
+static const int bc_period_z = -1;
+#endif
 
-static void boundary_top (Point point, int i)
+static void boundary_top (Point point, int i, int k)
 {
   bool data = false;
   for (scalar s in apply_bc_list)
     if (!s.face || s.i != s.v.y.i) {
+#if dimension == 2
       scalar b = (s.v.x.i < 0 ? s : s.i == s.v.y.i ? s.v.x : s.v.y);
+#elif dimension == 3
+      scalar b = (s.v.x.i < 0 ? s : s.i == s.v.y.i ? s.v.x : s.i == s.v.z.i ? s.v.y : s.v.z);
+#endif
       foreach_blockf(s)
-	s[i,-bc_period_y] = b.boundary_top (neighborp(i), neighborp(i,-bc_period_y), s, &data);
+	s[i,-bc_period_y,k] = b.boundary_top (neighborp(i,0,k), neighborp(i,-bc_period_y,k), s, &data);
     }
 }
 
-static void boundary_bottom (Point point, int i)
+static void boundary_bottom (Point point, int i, int k)
 {
   bool data = false;
   for (scalar s in apply_bc_list)
     if (!s.face || s.i != s.v.y.i) {
+#if dimension == 2
       scalar b = (s.v.x.i < 0 ? s : s.i == s.v.y.i ? s.v.x : s.v.y);
+#elif dimension == 3
+      scalar b = (s.v.x.i < 0 ? s : s.i == s.v.y.i ? s.v.x : s.i == s.v.z.i ? s.v.y : s.v.z);
+#endif
       foreach_blockf(s)
-	s[i,bc_period_y] = b.boundary_bottom (neighborp(i), neighborp(i,bc_period_y), s, &data);
+	s[i,bc_period_y,k] = b.boundary_bottom (neighborp(i,0,k), neighborp(i,bc_period_y,k), s, &data);
     }
 }
+
+#if dimension == 3
+static void boundary_front (Point point, int i, int j)
+{
+  bool data = false;
+  for (scalar s in apply_bc_list)
+    if (!s.face || s.i != s.v.z.i) {
+      scalar b = (s.v.x.i < 0 ? s : s.i == s.v.z.i ? s.v.x : s.i == s.v.x.i ? s.v.y : s.v.z);
+      foreach_blockf(s)
+	s[i,j,-bc_period_z] = b.boundary_front (neighborp(i,j,0), neighborp(i,j,-bc_period_z), s, &data);
+    }
+}
+
+static void boundary_back (Point point, int i, int j)
+{
+  bool data = false;
+  for (scalar s in apply_bc_list)
+    if (!s.face || s.i != s.v.z.i) {
+      scalar b = (s.v.x.i < 0 ? s : s.i == s.v.z.i ? s.v.x : s.i == s.v.x.i ? s.v.y : s.v.z);
+      foreach_blockf(s)
+	s[i,j,bc_period_z] = b.boundary_back (neighborp(i,j,0), neighborp(i,j,bc_period_z), s, &data);
+    }
+}
+#endif
 
 static
 void apply_bc (Point point)
@@ -585,19 +852,19 @@ void apply_bc (Point point)
     for (scalar s in apply_bc_list)
       if (s.face && s.i == s.v.x.i && s.boundary_left)
 	foreach_blockf(s)
-	  s[] = s.boundary_left (point, neighborp(bc_period_x), s, &data);
+	  s[] = s.boundary_left (point, neighborp(bc_period_x,0,0), s, &data);
   if (point.i == N*Dimensions.x + GHOSTS)
     for (scalar s in apply_bc_list)
       if (s.face && s.i == s.v.x.i && s.boundary_right)
 	foreach_blockf(s)
-	  s[] = s.boundary_right (neighborp(bc_period_x), point, s, &data);
+	  s[] = s.boundary_right (neighborp(bc_period_x,0,0), point, s, &data);
   if (point.j == GHOSTS)
     for (scalar s in apply_bc_list)
       if (s.face && s.i == s.v.y.i) {
 	scalar b = s.v.x;
 	if (b.boundary_bottom)
 	  foreach_blockf(s)
-	    s[] = b.boundary_bottom (point, neighborp(0,bc_period_y), s, &data);
+	    s[] = b.boundary_bottom (point, neighborp(0,bc_period_y,0), s, &data);
       }
   if (point.j == N*Dimensions.y + GHOSTS)
     for (scalar s in apply_bc_list)
@@ -605,33 +872,111 @@ void apply_bc (Point point)
 	scalar b = s.v.x;
 	if (b.boundary_top)
 	  foreach_blockf(s)
-	    s[] = b.boundary_top (neighborp(0,bc_period_y), point, s, &data);
+	    s[] = b.boundary_top (neighborp(0,bc_period_y,0), point, s, &data);
       }
+#if dimension == 3
+  if (point.k == GHOSTS)
+    for (scalar s in apply_bc_list)
+      if (s.face && s.i == s.v.z.i) {
+	scalar b = s.v.x;
+	if (b.boundary_back)
+	  foreach_blockf(s)
+	    s[] = b.boundary_back (point, neighborp(0,0,bc_period_z), s, &data);
+      }
+  if (point.k == N*Dimensions.z + GHOSTS)
+    for (scalar s in apply_bc_list)
+      if (s.face && s.i == s.v.z.i) {
+	scalar b = s.v.x;
+	if (b.boundary_front)
+	  foreach_blockf(s)
+	    s[] = b.boundary_front (neighborp(0,0,bc_period_z), point, s, &data);
+      }
+#endif
   // centered BCs
   if (point.i == GHOSTS) { // left
     for (scalar s in apply_bc_list)
       if (!s.face || s.i != s.v.x.i)
 	foreach_blockf(s)
-	  s[bc_period_x] = s.boundary_left (point, neighborp(bc_period_x), s, &data);
-    if (point.j == GHOSTS)
-      boundary_bottom (point, bc_period_x); // bottom-left
-    if (point.j == N*Dimensions.y + GHOSTS - 1)
-      boundary_top (point, bc_period_x);    // top-left
+	  s[bc_period_x,0,0] = s.boundary_left (point, neighborp(bc_period_x,0,0), s, &data);
+    if (point.j == GHOSTS) {
+      boundary_bottom (point, bc_period_x, 0);
+#if dimension == 3
+      if (point.k == GHOSTS)
+	boundary_back (point, bc_period_x, bc_period_y);
+      if (point.k == N*Dimensions.z + GHOSTS - 1)
+	boundary_front (point, bc_period_x, bc_period_y);
+#endif
+    }
+    if (point.j == N*Dimensions.y + GHOSTS - 1) {
+      boundary_top (point, bc_period_x, 0);
+#if dimension == 3
+      if (point.k == GHOSTS)
+	boundary_back (point, bc_period_x, -bc_period_y);
+      if (point.k == N*Dimensions.z + GHOSTS - 1)
+	boundary_front (point, bc_period_x, -bc_period_y);
+#endif
+    }
+#if dimension == 3
+    if (point.k == GHOSTS)
+      boundary_back (point, bc_period_x, 0);
+    if (point.k == N*Dimensions.z + GHOSTS - 1)
+      boundary_front (point, bc_period_x, 0);
+#endif
   }
   if (point.i == N*Dimensions.x + GHOSTS - 1) { // right
     for (scalar s in apply_bc_list)
       if (!s.face || s.i != s.v.x.i)
 	foreach_blockf(s)
-	  s[- bc_period_x] = s.boundary_right (point, neighborp(- bc_period_x), s, &data);
-    if (point.j == GHOSTS)
-      boundary_bottom (point, - bc_period_x); // bottom-right
-    if (point.j == N*Dimensions.y + GHOSTS - 1)
-      boundary_top (point, - bc_period_x);    // top-right
+	  s[-bc_period_x,0,0] = s.boundary_right (point, neighborp(-bc_period_x,0,0), s, &data);
+    if (point.j == GHOSTS) {
+      boundary_bottom (point, -bc_period_x, 0);
+#if dimension == 3
+      if (point.k == GHOSTS)
+	boundary_back (point, -bc_period_x, bc_period_y);
+      if (point.k == N*Dimensions.z + GHOSTS - 1)
+	boundary_front (point, -bc_period_x, bc_period_y);
+#endif
+    }
+    if (point.j == N*Dimensions.y + GHOSTS - 1) {
+      boundary_top (point, -bc_period_x, 0);
+#if dimension == 3
+      if (point.k == GHOSTS)
+	boundary_back (point, -bc_period_x, -bc_period_y);
+      if (point.k == N*Dimensions.z + GHOSTS - 1)
+	boundary_front (point, -bc_period_x, -bc_period_y);
+#endif
+    }
+#if dimension == 3
+    if (point.k == GHOSTS)
+      boundary_back (point, -bc_period_x, 0);
+    if (point.k == N*Dimensions.z + GHOSTS - 1)
+      boundary_front (point, -bc_period_x, 0);
+#endif
   }
-  if (point.j == GHOSTS)
-    boundary_bottom (point, 0);  // bottom
-  if (point.j == N*Dimensions.y + GHOSTS - 1)
-    boundary_top (point, 0);     // top
+  if (point.j == GHOSTS) {
+    boundary_bottom (point, 0, 0);
+#if dimension == 3
+    if (point.k == GHOSTS)
+      boundary_back (point, 0, bc_period_y);
+    if (point.k == N*Dimensions.z + GHOSTS - 1)
+      boundary_front (point, 0, bc_period_y);
+#endif
+  }
+  if (point.j == N*Dimensions.y + GHOSTS - 1) {
+    boundary_top (point, 0, 0);
+#if dimension == 3
+    if (point.k == GHOSTS)
+      boundary_back (point, 0, -bc_period_y);
+    if (point.k == N*Dimensions.z + GHOSTS - 1)
+      boundary_front (point, 0, -bc_period_y);
+#endif
+  }
+#if dimension == 3
+  if (point.k == GHOSTS)
+    boundary_back (point, 0, 0);
+  if (point.k == N*Dimensions.z + GHOSTS - 1)
+    boundary_front (point, 0, 0);
+#endif
 }
 
 static bool is_boundary_attribute (const External * g)
@@ -640,7 +985,12 @@ static bool is_boundary_attribute (const External * g)
 	  (!strcmp (g->name, ".boundary_left") ||
 	   !strcmp (g->name, ".boundary_right") ||
 	   !strcmp (g->name, ".boundary_bottom") ||
-	   !strcmp (g->name, ".boundary_top")));
+	   !strcmp (g->name, ".boundary_top")
+#if dimension == 3
+           || !strcmp (g->name, ".boundary_front")
+           || !strcmp (g->name, ".boundary_back")
+#endif
+           ));
 }
 
 static
@@ -702,8 +1052,8 @@ void hash_external (Adler32Hash * hash, const External * g, const ForeachData * 
       size = sizeof (tensor);
     a32_hash_add (hash, pointer, size);
   }
-  else if (IS_EXTERNAL_CONSTANT(g))
-    a32_hash_add (hash, g->pointer, sizeof(int));
+  else if (is_external_constant(g))
+    a32_hash_add (hash, g->pointer, external_size (g));
 }
 
 static
@@ -732,13 +1082,19 @@ uint32_t hash_shader (const External * externals,
       .nd = attroffset (boundary_top) },
     { .name = ".boundary_bottom", .type = sym_function_declaration,
       .nd = attroffset (boundary_bottom) },
+#if dimension == 3
+    { .name = ".boundary_front",    .type = sym_function_declaration,
+      .nd = attroffset (boundary_front) },
+    { .name = ".boundary_back", .type = sym_function_declaration,
+      .nd = attroffset (boundary_back) },
+#endif
 #if LAYERS
     { .name = ".block", .type = sym_INT, .nd = attroffset (block) },
 #endif
     { .name = NULL }
   };
   foreach_function (f, f->used = false);
-  for (const External * g = loop->dirty ? ext : ext + 4; g->name; g++)
+  for (const External * g = loop->dirty ? ext : ext + 2*dimension; g->name; g++)
     hash_external (&hash, g, loop, 2);
   int imax = 1;
   if (GPUContext.nssbo > 1)
@@ -792,11 +1148,297 @@ static char * type_string (const External * g)
   return "unknown_type";
 }
 
+static
+char * external_declaration (char * fs, const External * g)
+{
+  char * type = type_string (g);
+  fs = str_append (fs, type, " ", EXTERNAL_NAME (g));
+  for (int * d = g->data; d && *d > 0; d++) {
+    char s[20]; snprintf (s, 19, "%d", *d);
+    fs = str_append (fs, "[", s, "]");
+  }
+  return fs;
+}
+
+static
+char * external_write (char * fs, const External * g, const ForeachData * loop,
+                       const RegionParameters * region, const unsigned nwg[dimension],
+		       bool local)
+{
+
+  /**
+  Variables declared within the body of the kernel cannot use the
+  `constant` address space of Metal (see `_CONST_` in
+  [DEFINITIONS](#definitions)). */
+
+  const char * _const_ = local ? "const " : "_CONST_ ";
+  if (g->name[0] == '.') {
+    if (g->type == sym_function_declaration) {
+      bool boundary = is_boundary_attribute (g);
+      fs = str_append (fs, "#define _attr_", g->name + 1, "(s,args) (");
+      foreach_function (f, f->used = false);
+      char * expr = NULL;
+      for (scalar s in baseblock)
+        if (s.gpu.index) {
+          char * data = (char *) &_attribute[s.i];
+          void * func = *((void **)(data + g->nd));
+          if (func) {
+            External * f = _get_function ((long) func);
+            if (!f->used && (!boundary || (s.stencil.io & s_output))) {
+              f->used = true;
+              char * args = is_void_function (f->data) ? " args,0" : " args";
+              if (!expr)
+                expr = str_append (NULL, "(", f->name, args, ")");
+              else {
+                char index[20];
+                snprintf (index, 19, "%d", f->nd);
+                char * s = str_append (NULL, "_attr(s,", g->name + 1, ")==", index,
+                                       "?(", f->name, args, "):", expr);
+                sysfree (expr);
+                expr = s;
+              }
+            }
+          }
+        }
+      if (expr) {
+        fs = str_append (fs, expr, ")\n");
+        sysfree (expr);
+      }
+      else
+        fs = str_append (fs, "0)\n");
+    }
+  }
+  else if (g->type == sym_function_definition) {
+    External * f = _get_function ((long) g->pointer);
+#if _HIP_AMD
+    fs = str_append (fs, "\n__device__ ", f->data, "\n");
+#elif _METAL
+    char * code = metal_thread_qualifiers (f->data);
+    fs = str_append (fs, "\n", code, "\n");
+    sysfree (code);
+#else
+    fs = str_append (fs, "\n", f->data, "\n");
+#endif
+    char s[20]; snprintf (s, 19, "%d", f->nd);
+    fs = str_append (fs, "_CONST_ int _p", g->name, " = ", s, ";\n");
+  }
+  else if (g->type == sym_function_declaration) {
+    External * f = _get_function ((long) g->pointer);
+    char s[20]; snprintf (s, 19, "%d", f->nd);
+    fs = str_append (fs, "_CONST_ int ", g->name, " = ", s, ";\n",
+                     "#define _f", g->name, "(args) (", f->name, " args)\n");
+  }
+  else if (g->type != sym_SCALAR &&
+           g->type != sym_VECTOR &&
+           g->type != sym_TENSOR) {
+    if (g->type == sym_INT && g->global && !strcmp (g->name, "N")) {
+      int Nl = region->level > 0 ? 1 << (region->level - 1) : N/Dimensions.x;
+      int level = region->level > 0 ? region->level - 1 : depth();
+      char s[20], d[20], l[20];
+      snprintf (s, 19, "%d", Nl);
+      snprintf (d, 19, "%d", depth());
+      snprintf (l, 19, "%d", level);
+      fs = str_append (fs,
+                       "_CONST_ uint N = ", s, ", _depth = ", d, ";\n");
+      if (GPUContext.nssbo <= 1) {
+        char size[30];
+        snprintf (size, 29, "%ld", (size_t) field_size());	  
+        fs = str_append (fs,
+                         "_CONST_ uint _field_size = ", size, ";\n");
+      }
+#ifdef shift_level // multigrid
+      char nd[20]; snprintf (nd, 19, "%d", depth() + 1);
+      fs = str_append (fs,
+                       "_CONST_ uint _shift[", nd, "] = {");
+      for (int d = 0; d <= depth(); d++) {
+        snprintf (s, 19, "%ld", shift_level(d));
+        fs = str_append (fs,  d > 0 ? "," : "", s);
+      }
+      fs = str_append (fs, "};\n");
+#endif // ifdef shift_level
+      snprintf (s, 19, "%d", Dimensions.x);
+      snprintf (d, 19, "%d", Dimensions.y);
+#if dimension == 2
+      fs = str_append (fs,
+                       "_CONST_ ivec2 Dimensions = {", s, ",", d, "};\n"
+                       "_CONST_ uint NY = N*", d,
+                       loop->face > 1 || loop->vertex ? "+1" : "", ";\n");
+#elif dimension == 3
+      char e[20];
+      snprintf (e, 19, "%d", Dimensions.z);
+      fs = str_append (fs,
+                       "_CONST_ ivec3 Dimensions = {", s, ",", d, ",", e, "};\n"
+                       "_CONST_ uint NY = N*", d,
+                       (loop->face & (1 << 1)) || loop->vertex ? "+1" : "", ";\n"
+                       "_CONST_ uint NZ = N*", e,
+                       (loop->face & (1 << 2)) || loop->vertex ? "+1" : "", ";\n");
+#endif
+#if !_CUDA
+#if dimension == 2
+      if (GPUContext.fragment_shader)
+        fs = str_append (fs, "in vec2 vsPoint;\n"
+                         "Point point = {int((vsPoint.x*vsScale.x + vsOrigin.x)*N*Dimensions.x)"
+                         " + GHOSTS,"
+                         "int((vsPoint.y*vsScale.y + vsOrigin.y)*N*Dimensions.x) + GHOSTS,", l,
+#if MULTIGRID
+                         ",{int(N*Dimensions.x),int(N*Dimensions.y)}"
+#else
+                         ",N"
+#endif
+#if LAYERS
+                         ",0"
+#endif
+                         "};\n"
+                         "out vec4 FragColor;\n");
+#elif dimension == 3
+      assert (!GPUContext.fragment_shader);
+#endif
+      else {
+        char nwgx[20], nwgy[20];
+        snprintf (nwgx, 19, "%d", nwg[0]);
+        snprintf (nwgy, 19, "%d", nwg[1]);
+#if dimension == 2
+        fs = str_append (fs, "layout (local_size_x = ", nwgx,
+                         ", local_size_y = ", nwgy, ") in;\n");
+#elif dimension == 3
+        char nwgz[20];
+        snprintf (nwgz, 19, "%d", nwg[2]);
+        fs = str_append (fs, "layout (local_size_x = ", nwgx,
+                         ", local_size_y = ", nwgy,
+                         ", local_size_z = ", nwgz, ") in;\n");
+#endif
+      }
+#endif // !_CUDA
+    }
+    else if (g->type == sym_INT && g->global && !strcmp (g->name, "nl")) {
+
+      /**
+         'int nl' gets special treatment. */
+	
+      char nl[20];
+      snprintf (nl, 19, "%d", *((int *)g->pointer));
+      fs = str_append (fs, "_CONST_ int nl = ", nl, ";\n");
+    }
+    else if (g->type == sym_INT && g->global && !strcmp (g->name, "bc_period_x")) {
+      char s[20] = "-1";
+      if (Period.x)
+#if _OPENCL
+        snprintf (s, 19, "(int)(N*%d)", Dimensions.x);
+#else
+        snprintf (s, 19, "int(N*%d)", Dimensions.x);
+#endif
+      fs = str_append (fs, "_CONST_ int bc_period_x = ", s, ";\n");
+    }
+    else if (g->type == sym_INT && g->global && !strcmp (g->name, "bc_period_y")) {
+      char s[20] = "-1";
+      if (Period.y)
+#if _OPENCL
+        snprintf (s, 19, "(int)(N*%d)", Dimensions.y);
+#else
+        snprintf (s, 19, "int(N*%d)", Dimensions.y);
+#endif
+      fs = str_append (fs, "_CONST_ int bc_period_y = ", s, ";\n");
+    }
+#if dimension == 3
+    else if (g->type == sym_INT && g->global && !strcmp (g->name, "bc_period_z")) {
+      char s[20] = "-1";
+      if (Period.z)
+#if _OPENCL
+        snprintf (s, 19, "(int)(N*%d)", Dimensions.z);
+#else
+        snprintf (s, 19, "int(N*%d)", Dimensions.z);
+#endif
+      fs = str_append (fs, "_CONST_ int bc_period_z = ", s, ";\n");
+    }
+#endif
+#if dimension == 2
+    else if (GPUContext.fragment_shader && (region->n.x > 1 || region->n.y > 1) &&
+             g->type == sym_COORD && !strcmp (g->name, "p")) {
+
+      /**
+         'coord p' is assumed to be the parameter of a region. This is
+         not flexible (the parameter must be called 'p') and should be improved. */
+	
+      fs = str_append (fs, "coord p = vec3((vsPoint*vsScale + vsOrigin)*L0 + vec2(X0, Y0),0);\n");
+    }
+#endif
+    else if (is_external_constant (g)) {
+      char value[30];
+      assert (g->pointer);
+      switch (g->type) {
+      case sym_INT: snprintf (value, 29, "%d", *((int *)g->pointer)); break;
+      case sym_LONG: snprintf (value, 29, "%ld", *((long *)g->pointer)); break;
+      case sym_FLOAT: snprintf (value, 29, "%.9gf", *((float *)g->pointer)); break;
+      case sym_DOUBLE: snprintf (value, 29, "%#.17g", *((double *)g->pointer)); break;
+      case sym_BOOL: snprintf (value, 29, "%d", *((bool *)g->pointer)); break;
+      default:
+        assert (false); // not implemented yet
+      }
+      fs = str_append (fs, _const_, type_string (g), " ", EXTERNAL_NAME (g), "=", value, ";\n");
+    }
+    else if (strcmp (g->name, "Dimensions") && g->reduct != '+') {
+#if !_CUDA
+      fs = str_append (fs, "uniform ");
+      fs = external_declaration (fs, g);
+      fs = str_append (fs, ";\n");
+#endif // !_CUDA
+    }
+  }
+  else { // scalar, vector and tensor fields
+    int size = list_size (g);
+    for (int j = 0; j < size; j++) {
+      if (j == 0) {
+        fs = str_append (fs, _const_, type_string (g), " ", EXTERNAL_NAME (g));
+        if (g->nd == 0)
+          fs = str_append (fs, " = ");
+        else {
+          char s[20]; snprintf (s, 19, "%d", size);
+          fs = str_append (fs, "[", s, "] = {");
+        }
+      }
+      if (g->nd == 0 || j < size - 1) {
+        if (g->type == sym_SCALAR)
+          fs = write_scalar (fs, ((scalar *)g->pointer)[j]);
+        else if (g->type == sym_VECTOR)
+          fs = write_vector (fs, ((vector *)g->pointer)[j]);
+        else if (g->type == sym_TENSOR)
+          fs = write_tensor (fs, ((tensor *)g->pointer)[j]);
+        else
+          assert (false);
+      }
+      else { // last element of a list is always ignored (this is necessary for empty lists)
+        if (g->type == sym_SCALAR)
+          fs = str_append (fs, "{0,0}");
+        else if (g->type == sym_VECTOR)
+#if dimension == 2
+          fs = str_append (fs, "{{0,0},{0,0}}");
+#elif dimension == 3
+          fs = str_append (fs, "{{0,0},{0,0},{0,0}}");
+#endif
+        else if (g->type == sym_TENSOR)
+#if dimension == 2
+          fs = str_append (fs, "{{{0,0},{0,0}},{{0,0},{0,0}}}");
+#elif dimension == 3
+          fs = str_append (fs, "{{{0,0},{0,0},{0,0}},{{0,0},{0,0},{0,0}},{{0,0},{0,0},{0,0}}}");
+#endif
+        else
+          assert (false);
+      }
+      if (g->nd == 0)
+        fs = str_append (fs, ";\n");
+      else if (j < size - 1)
+        fs = str_append (fs, ",");
+      else
+        fs = str_append (fs, "};\n");
+    }
+  }
+  return fs;
+}
+
 trace
 char * build_shader (External * externals, const ForeachData * loop,
-		     const RegionParameters * region, const unsigned nwg[2])
+		     const RegionParameters * region, const unsigned nwg[dimension])
 {
-  int Nl = region->level > 0 ? 1 << (region->level - 1) : N/Dimensions.x;
   char s[30];
   snprintf (s, 19, "%d", nconst > 0 ? nconst : 1);
   char a[20];
@@ -806,16 +1448,14 @@ char * build_shader (External * externals, const ForeachData * loop,
                           "#version 430\n",
 #endif
                           glsl_preproc,
-			  "const int _nconst = ", s, ";\n"
-			  "const real _constant[_nconst] = {", a);
+			  "_CONST_ int _nconst = ", s, ";\n"
+			  "_CONST_ real _constant[", s, "] = {", a);
   for (int i = 1; i < nconst; i++) {
     snprintf (a, 19, "%g", _constant[i]);
     fs = str_append (fs, ",", a);
   }
   fs = str_append (fs, "};\n"
-#if _CUDA
-                   "uniform real * _data;\n"
-#else
+#if !_CUDA
 		   "layout(std430, binding = 0)"
 		   " restrict buffer _data_layout { real f[]; } _data"
 #endif
@@ -828,9 +1468,12 @@ char * build_shader (External * externals, const ForeachData * loop,
 		     "].f[(_offset[(field)].j+(index))%", s, "]\n");
   }
   else
-#if _CUDA
+#if _OPENCL || _METAL
     fs = str_append (fs,
 		     "#define _data_val(field,index) _data[(field)*field_size() + (index)]\n");
+#elif _CUDA
+    fs = str_append (fs,
+		     "#define _data_val(field,index) _ctx_->_data[(field)*field_size() + (index)]\n");
 #else
     fs = str_append (fs, ";\n"
 		     "#define _data_val(field,index) _data.f[(field)*field_size() + (index)]\n");
@@ -851,7 +1494,11 @@ char * build_shader (External * externals, const ForeachData * loop,
     }
   
   if (attributes) {
+#if _OPENCL
+    fs = str_append (fs, "typedef struct {\n", attributes, "} _Attributes;\n");
+#else
     fs = str_append (fs, "struct _Attributes {\n", attributes, "};\n");
+#endif
     sysfree (attributes);
     int nindex = 0;
     for (scalar s in baseblock)
@@ -859,7 +1506,7 @@ char * build_shader (External * externals, const ForeachData * loop,
 	nindex++;
     assert (nindex > 0);
     char s[20]; snprintf (s, 19, "%d", nindex);
-    fs = str_append (fs, "const _Attributes _attr[", s, "]={");
+    fs = str_append (fs, "_CONST_ _Attributes _attr[", s, "]={");
     nindex = 0;
     for (scalar s in baseblock)
       if (s.gpu.index) {
@@ -886,7 +1533,11 @@ char * build_shader (External * externals, const ForeachData * loop,
 	    }
 	    else if (g->type == sym_IVEC) {
 	      ivec * v = (ivec *)(data + g->nd);
+#if dimension == 2
 	      char s[20]; snprintf (s, 19, "{%d,%d}", v->x, v->y);
+#elif dimension == 3
+	      char s[20]; snprintf (s, 19, "{%d,%d,%d}", v->x, v->y, v->z);
+#endif
 	      fs = str_append (fs, s);
 	    }
 	    else if (g->type == sym_function_declaration) {
@@ -928,7 +1579,7 @@ char * build_shader (External * externals, const ForeachData * loop,
 	  imax = s.i + s.block;
       }
     char string[100]; snprintf (string, 19, "%d", imax);
-    fs = str_append (fs, "const struct { uint i, j; } _offset[", string, "]={");
+    fs = str_append (fs, "_CONST_ struct { uint i, j; } _offset[", string, "]={");
     for (int s = 0; s < imax; s++) {
       fs = str_append (fs, s ? ",{" : "{");
       size_t offset = s*field_size(), size = GPUContext.max_ssbo_size/sizeof(real);
@@ -946,201 +1597,41 @@ char * build_shader (External * externals, const ForeachData * loop,
   }
   
   /**
-  Non-local variables */
+  Global variables */
 
-  for (External * g = externals; g; g = g->next) {
-    if (g->name[0] == '.') {
-      if (g->type == sym_function_declaration) {
-	bool boundary = is_boundary_attribute (g);
-	fs = str_append (fs, "#define _attr_", g->name + 1, "(s,args) (");
-	foreach_function (f, f->used = false);
-	char * expr = NULL;
-	for (scalar s in baseblock)
-	  if (s.gpu.index) {
-	    char * data = (char *) &_attribute[s.i];
-	    void * func = *((void **)(data + g->nd));
-	    if (func) {
-	      External * f = _get_function ((long) func);
-	      if (!f->used && (!boundary || (s.stencil.io & s_output))) {
-		f->used = true;
-		char * args = is_void_function (f->data) ? " args,0" : " args";
-		if (!expr)
-		  expr = str_append (NULL, "(", f->name, args, ")");
-		else {
-		  char index[20];
-		  snprintf (index, 19, "%d", f->nd);
-		  char * s = str_append (NULL, "_attr(s,", g->name + 1, ")==", index,
-					 "?(", f->name, args, "):", expr);
-		  sysfree (expr);
-		  expr = s;
-		}
-	      }
-	    }
-	  }
-	if (expr) {
-	  fs = str_append (fs, expr, ")\n");
-	  sysfree (expr);
-	}
-	else
-	  fs = str_append (fs, "0)\n");
-      }
-    }
-    else if (g->type == sym_function_definition) {
-      External * f = _get_function ((long) g->pointer);
-#if _HIP_AMD
-      fs = str_append (fs, "\n__device__ ", f->data, "\n");
-#else
-      fs = str_append (fs, "\n", f->data, "\n");
-#endif
-      char s[20]; snprintf (s, 19, "%d", f->nd);
-      fs = str_append (fs, "const int _p", g->name, " = ", s, ";\n");
-    }
-    else if (g->type == sym_function_declaration) {
-      External * f = _get_function ((long) g->pointer);
-      char s[20]; snprintf (s, 19, "%d", f->nd);
-      fs = str_append (fs, "const int ", g->name, " = ", s, ";\n",
-		       "#define _f", g->name, "(args) (", f->name, " args)\n");
-    }
-    else if (g->type != sym_SCALAR &&
-	     g->type != sym_VECTOR &&
-	     g->type != sym_TENSOR) {
-      if (g->type == sym_INT && !strcmp (g->name, "N")) {
-	int level = region->level > 0 ? region->level - 1 : depth();
-	char s[20], d[20], l[20];
-	snprintf (s, 19, "%d", Nl);
-	snprintf (d, 19, "%d", depth());
-	snprintf (l, 19, "%d", level);
-	fs = str_append (fs,
-			 "const uint N = ", s, ", _depth = ", d, ";\n");
-	if (GPUContext.nssbo <= 1) {
-	  char size[30];
-	  snprintf (size, 29, "%ld", (size_t) field_size());	  
-	  fs = str_append (fs,
-			   "const uint _field_size = ", size, ";\n");
-	}
-#ifdef shift_level // multigrid
-	fs = str_append (fs,
-			 "const uint _shift[_depth + 1] = {");
-	for (int d = 0; d <= depth(); d++) {
-	  snprintf (s, 19, "%ld", shift_level(d));
-	  fs = str_append (fs,  d > 0 ? "," : "", s);
-	}
-	fs = str_append (fs, "};\n");
-#endif // ifdef shift_level
-        snprintf (s, 19, "%d", Dimensions.x);
-        snprintf (d, 19, "%d", Dimensions.y);
-	fs = str_append (fs,
-                         "const ivec2 Dimensions = {", s, ",", d, "};\n"
-			 "const uint NY = N*", d,
-                         loop->face > 1 || loop->vertex ? "+1" : "", ";\n");
-#if !_CUDA
-	if (GPUContext.fragment_shader)
-	  fs = str_append (fs, "in vec2 vsPoint;\n"
-			   "Point point = {int((vsPoint.x*vsScale.x + vsOrigin.x)*N*Dimensions.x)"
-			   " + GHOSTS,"
-			   "int((vsPoint.y*vsScale.y + vsOrigin.y)*N*Dimensions.x) + GHOSTS,", l,
-#if MULTIGRID
-			   ",{int(N*Dimensions.x),int(N*Dimensions.y)}"
-#else
-			   ",N"
-#endif
-#if LAYERS
-			   ",0"
-#endif
-			   "};\n"
-			   "out vec4 FragColor;\n");
-	else {
-	  char nwgx[20], nwgy[20];
-	  snprintf (nwgx, 19, "%d", nwg[0]);
-	  snprintf (nwgy, 19, "%d", nwg[1]);
-	  fs = str_append (fs, "layout (local_size_x = ", nwgx,
-			   ", local_size_y = ", nwgy, ") in;\n");
-	}
-#endif // !_CUDA
-      }
-      else if (g->type == sym_INT && !strcmp (g->name, "nl")) {
+#if _METAL
 
-	/**
-	'int nl' gets special treatment. */
-	
-	char nl[20];
-	snprintf (nl, 19, "%d", *((int *)g->pointer));
-	fs = str_append (fs, "const int nl = ", nl, ";\n");
-      }
-      else if (g->type == sym_INT && !strcmp (g->name, "bc_period_x"))
-	fs = str_append (fs, "const int bc_period_x = ", Period.x ?
-			 "int(N*Dimensions.x)" : "-1", ";\n");
-      else if (g->type == sym_INT && !strcmp (g->name, "bc_period_y"))
-	fs = str_append (fs, "const int bc_period_y = ", Period.y ?
-			 "int(N*Dimensions.y)" : "-1", ";\n");
-      else if (GPUContext.fragment_shader && (region->n.x > 1 || region->n.y > 1) &&
-	       g->type == sym_COORD && !strcmp (g->name, "p")) {
+  /**
+  Metal does not allow pointers in `constant` buffers: the first field
+  is only a placeholder which matches the layout of the corresponding
+  structure on the host. */
 
-	/**
-	'coord p' is assumed to be the parameter of a region. This is
-	not flexible (the parameter must be called 'p') and should be improved. */
-	
-	fs = str_append (fs, "coord p = vec3((vsPoint*vsScale + vsOrigin)*L0 + vec2(X0, Y0),0);\n");
-      }
-      else if (IS_EXTERNAL_CONSTANT(g)) {
-	// fixme: for the moment only 'const int' are considered, this could be generalised
-	char value[20];
-	assert (g->pointer);
-	snprintf (value, 19, "%d", *((int *)g->pointer));
-	fs = str_append (fs, "const ", type_string (g), " ", EXTERNAL_NAME (g), "=", value, ";\n");
-      }
-      else if (strcmp (g->name, "Dimensions")) {
-	char * type = type_string (g);
-	fs = str_append (fs, "uniform ", type, " ", EXTERNAL_NAME (g));
-	for (int * d = g->data; d && *d > 0; d++) {
-	  char s[20]; snprintf (s, 19, "%d", *d);
-	  fs = str_append (fs, "[", s, "]");
-	}
-	fs = str_append (fs, ";\n");
-      }
+  fs = str_append (fs, "struct _Ctx_ {\n  ulong _data;\n");
+  for (const External * g = externals; g; g = g->next)
+    if (g->global && is_external_variable (g)) {
+      fs = str_append (fs, "  ");
+      fs = external_declaration (fs, g);
+      fs = str_append (fs, ";\n");
     }
-    else { // scalar, vector and tensor fields
-      int size = list_size (g);
-      for (int j = 0; j < size; j++) {
-	if (j == 0) {
-	  fs = str_append (fs, "const ", type_string (g), " ", EXTERNAL_NAME (g));
-	  if (g->nd == 0)
-	    fs = str_append (fs, " = ");
-	  else {
-	    char s[20]; snprintf (s, 19, "%d", size);
-	    fs = str_append (fs, "[", s, "] = {");
-	  }
-	}
-	if (g->nd == 0 || j < size - 1) {
-	  if (g->type == sym_SCALAR)
-	    fs = write_scalar (fs, ((scalar *)g->pointer)[j]);
-	  else if (g->type == sym_VECTOR)
-	    fs = write_vector (fs, ((vector *)g->pointer)[j]);
-	  else if (g->type == sym_TENSOR)
-	    fs = write_tensor (fs, ((tensor *)g->pointer)[j]);
-	  else
-	    assert (false);
-	}
-	else { // last element of a list is always ignored (this is necessary for empty lists)
-	  if (g->type == sym_SCALAR)
-	    fs = str_append (fs, "{0,0}");
-	  else if (g->type == sym_VECTOR)
-	    fs = str_append (fs, "{{0,0},{0,0}}");
-	  else if (g->type == sym_TENSOR)
-	    fs = str_append (fs, "{{{0,0},{0,0}},{{0,0},{0,0}}}");
-	  else
-	    assert (false);
-	}
-	if (g->nd == 0)
-	  fs = str_append (fs, ";\n");
-	else if (j < size - 1)
-	  fs = str_append (fs, ",");
-	else
-	  fs = str_append (fs, "};\n");
-      }
+  fs = str_append (fs, "};\n");
+#elif _CUDA
+  fs = str_append (fs, "struct _Ctx_ {\n  __global real * _data;\n");
+  for (const External * g = externals; g; g = g->next)
+    if (g->global && is_external_variable (g)) {
+      fs = str_append (fs, "  const ");
+      fs = external_declaration (fs, g);
+      fs = str_append (fs, ";\n");
     }
-  }
-    
+  fs = str_append (fs, "};\n");
+#endif // _CUDA
+
+  /**
+  Global definitions */
+  
+  for (External * g = externals; g; g = g->next)    
+    if (g->global || !is_normal_variable (g) || is_external_variable (g))
+      fs = external_write (fs, g, loop, region, nwg, false);
+      
   return fs;
 }
 
@@ -1175,6 +1666,10 @@ Shader * load_shader (const char * fs, uint32_t hash, const ForeachData * loop)
     assert (ret > 0);
     kh_value (gpu_grid->shaders, k) = shader;
   }
+#if PRINTSHADERERROR
+  else
+    fputs (fs, stderr);
+#endif
   sysfree ((void *)fs);
   return shader;
 }
@@ -1213,6 +1708,10 @@ attribute {
   double (* boundary_right)  (Point, Point, scalar, bool *);
   double (* boundary_top)    (Point, Point, scalar, bool *);
   double (* boundary_bottom) (Point, Point, scalar, bool *);
+#if dimension == 3
+  double (* boundary_front)  (Point, Point, scalar, bool *);
+  double (* boundary_back)   (Point, Point, scalar, bool *);
+#endif
 }
 
 /**
@@ -1306,15 +1805,19 @@ static External * merge_external (External * externals, External ** end, Externa
   }
   for (External * i = externals; i; i = i->next)
     if (!strcmp (g->name, i->name)) {
-
+      if (g->global == i->global) // already in the list
+        return externals;
+      
+#if !_CUDA
       /**
       Check whether a local *g* (resp. *i*) shadows a global *i* (resp
       *g*). */
-      
-      if (g->global == 0 && i->global == 1) g->global = 2;
-      else if (g->global == 1 && i->global == 0) i->global = 2;
-      else // already in the list
-	return externals;
+
+      if (g->global == 0 && i->global == 1 && is_external_variable (g))
+        g->global = 2;
+      else if (g->global == 1 && i->global == 0 && is_external_variable (i))
+        i->global = 2;
+#endif // !_CUDA
     }
   return append_external (externals, end, g);
 }
@@ -1348,10 +1851,12 @@ static External * merge_externals (External * externals, const ForeachData * loo
     g->used = false;
     merged = merge_external (merged, &end, g, loop);
   }
+#if 1
   if (loop->dirty) {
     bc.used = false;
     merged = merge_external (merged, &end, &bc, loop);
   }
+#endif
   for (External * g = externals; g->name; g++)
     merged = merge_external (merged, &end, g, loop);
 #if PRINTEXTERNAL  
@@ -1365,14 +1870,50 @@ static External * merge_externals (External * externals, const ForeachData * loo
   return merged;
 }
 
-static char * shader_append_func (char * s, const ForeachData * loop)
+static char * shader_append_func (char * s, const ForeachData * loop, const External * externals)
 {
 #if _CUDA
   char func[strlen(loop->func) + 20];
   sprintf (func, "%s_%d", loop->func, loop->line);
-  return str_append (s,
-                     "extern \"C\" __global__\n"
-                     "void ", func, "() {\n");
+  char * locals = NULL;
+  for (const External * g = externals; g; g = g->next)
+    if (!g->global && is_external_variable (g)) {
+      locals = str_append (locals, "  ");
+      locals = external_declaration (locals, g);
+      locals = str_append (locals, ";\n");
+    }
+  if (locals)
+    s = str_append (s, "struct _Local {\n", locals, "};\n");
+#if _METAL
+
+  /**
+  Metal kernel arguments must be explicitly bound to buffer indices
+  and the position of the thread in the grid is obtained through an
+  attribute qualifier. */
+
+  s = str_append (s,
+                  "kernel\n"
+                  "void ", func, "("
+                  "device real * _data [[buffer(0)]], "
+                  "constant struct _Ctx_ * _ctx_ [[buffer(1)]], "
+                  "constant ivec & csOrigin [[buffer(2)]]");
+  if (locals)
+    s = str_append (s, ", constant struct _Local & _local_ [[buffer(3)]]");
+  s = str_append (s, ", uint" xstr(dimension) " _tpig [[thread_position_in_grid]]){\n");
+#else // !_METAL
+  s = str_append (s,
+#if _OPENCL
+                  "__kernel\n"
+#else // _CUDA
+                  "extern \"C\" __global__\n"
+#endif
+                  "void ", func, "(", _GLOB_PARAMS0 ", const ivec csOrigin"
+                  );
+  if (locals)
+    s = str_append (s, ", const struct _Local _local_");
+  s = str_append (s, "){\n");
+#endif // !_METAL
+  return s;
 #else // !_CUDA
   return str_append (s, "void main() {\n");
 #endif
@@ -1441,27 +1982,32 @@ static Shader * compile_shader (ForeachData * loop,
   /**
   ## Number of compute shader work groups and groups */
 
+#if dimension == 2
   static const int NWG[2] = {16, 16};
-  unsigned ng[2], nwg[2];
+#elif dimension == 3
+  static const int NWG[3] = {8, 8, 8};
+#endif
+  unsigned ng[3] = {1, 1, 1};
+  unsigned nwg[3] = {1, 1, 1};
   int Nl = region->level > 0 ? 1 << (region->level - 1) : N/Dimensions.x;
   int * dims = &Dimensions.x;
   if (loop->face || loop->vertex)
-    for (int i = 0; i < 2; i++) {
-      if (Nl*dims[1-i] > NWG[i]) {
+    for (int i = 0; i < dimension; i++) {
+      if (Nl*dims[dimension - 1 - i] > NWG[i]) {
 	nwg[i] = NWG[i] + 1;
-	ng[i] = Nl*dims[1-i]/NWG[i];
+	ng[i] = Nl*dims[dimension - 1 - i]/NWG[i];
       }
       else {
-	nwg[i] = Nl*dims[1-i] + 1;
+	nwg[i] = Nl*dims[dimension - 1 - i] + 1;
 	ng[i] = 1;
       }
-      assert (nwg[i]*ng[i] >= Nl*dims[1-i] + 1);
+      assert (nwg[i]*ng[i] >= Nl*dims[dimension - 1 - i] + 1);
     }
   else
-    for (int i = 0; i < 2; i++) {
+    for (int i = 0; i < dimension; i++) {
       nwg[i] = Nl < NWG[i] ? Nl : NWG[i];
-      ng[i] = Nl*dims[1-i]/nwg[i];
-      assert (nwg[i]*ng[i] == Nl*dims[1-i]);
+      ng[i] = Nl*dims[dimension - 1 - i]/nwg[i];
+      assert (nwg[i]*ng[i] == Nl*dims[dimension - 1 - i]);
     }
  
   char * shader = build_shader (merged, loop, region, nwg);
@@ -1472,6 +2018,9 @@ static Shader * compile_shader (ForeachData * loop,
   ## main() */
 
   if (local) {
+#if _CUDA
+    assert (false); // never true in _CUDA
+#endif
     shader = str_append (shader, "void _loop (");
     for (const External * g = merged; g; g = g->next)
       if (g->global == 2) {
@@ -1487,29 +2036,54 @@ static Shader * compile_shader (ForeachData * loop,
     shader = str_append (shader, ") {\n");
   }
   else
-    shader = shader_append_func (shader, loop);
+    shader = shader_append_func (shader, loop, merged);
 
   if (!GPUContext.fragment_shader) {
     char d[20];
     snprintf (d, 19, "%d", region->level > 0 ? region->level - 1 : depth());
     shader = str_append (shader,
-#if _CUDA
-                         "Point point = {csOrigin.x + int(blockIdx.y * blockDim.y + threadIdx.y) + GHOSTS,"
-			 "csOrigin.y + int(blockIdx.x * blockDim.x + threadIdx.x) + GHOSTS,", d,
-#if MULTIGRID
-			 ",{(1<<",d,")*Dimensions.x,(1<<",d,")*Dimensions.y}"
-#else
-			 ",N"
-#endif
-#else // !_CUDA
+#if dimension == 2
+#if _METAL
+                         "Point point = {csOrigin.x + int(_tpig.y) + GHOSTS,"
+			 "csOrigin.y + int(_tpig.x) + GHOSTS,", d,
+#elif _OPENCL
+                         "Point point = {csOrigin.x + get_group_id(1)*get_local_size(1) + get_local_id(1) + GHOSTS,"
+                         "csOrigin.y + get_group_id(0)*get_local_size(0) + get_local_id(0) + GHOSTS,", d,
+#elif _CUDA
+                         "Point point = {csOrigin.x + int(blockIdx.y*blockDim.y + threadIdx.y) + GHOSTS,"
+			 "csOrigin.y + int(blockIdx.x*blockDim.x + threadIdx.x) + GHOSTS,", d,
+#else // GLSL
                          "Point point = {csOrigin.x + int(gl_GlobalInvocationID.y) + GHOSTS,"
 			 "csOrigin.y + int(gl_GlobalInvocationID.x) + GHOSTS,", d,
+#endif
+#elif dimension == 3
+#if _METAL
+                         "Point point = {csOrigin.x + int(_tpig.z) + GHOSTS,"
+			 "csOrigin.y + int(_tpig.y) + GHOSTS,"
+			 "csOrigin.z + int(_tpig.x) + GHOSTS,", d,
+#elif _OPENCL
+                         "Point point = {csOrigin.x + get_group_id(2)*get_local_size(2) + get_local_id(2) + GHOSTS,"
+                         "csOrigin.y + get_group_id(1)*get_local_size(1) + get_local_id(1) + GHOSTS,"
+                         "csOrigin.z + get_group_id(0)*get_local_size(0) + get_local_id(0) + GHOSTS,", d,
+#elif _CUDA
+                         "Point point = {csOrigin.x + int(blockIdx.z*blockDim.z + threadIdx.z) + GHOSTS,"
+			 "csOrigin.y + int(blockIdx.y*blockDim.y + threadIdx.y) + GHOSTS,"
+			 "csOrigin.z + int(blockIdx.x*blockDim.x + threadIdx.x) + GHOSTS,", d,
+#else // GLSL
+                         "Point point = {csOrigin.x + int(gl_GlobalInvocationID.z) + GHOSTS,"
+			 "csOrigin.y + int(gl_GlobalInvocationID.y) + GHOSTS,"
+			 "csOrigin.z + int(gl_GlobalInvocationID.x) + GHOSTS,", d,
+#endif
+#endif
 #if MULTIGRID
+#if dimension == 2
 			 ",{(1<<",d,")*Dimensions.x,(1<<",d,")*Dimensions.y}"
+#elif dimension == 3
+			 ",{(1<<",d,")*Dimensions.x,(1<<",d,")*Dimensions.y,(1<<",d,")*Dimensions.z}"
+#endif
 #else
 			 ",N"
 #endif
-#endif // !_CUDA
 #if LAYERS
 			 ",0};\n"
 #else
@@ -1517,25 +2091,41 @@ static Shader * compile_shader (ForeachData * loop,
 #endif
 			 );
   }
+#if dimension == 2
   shader = str_append (shader,
 		       "if (point.i < N*Dimensions.x + 2*GHOSTS && "
 		       "point.j < N*Dimensions.y + 2*GHOSTS) {\n");
   if (loop->vertex)
     shader = str_append (shader, "  int ig = -1, jg = -1;\n");
-#if 1
-  for (const External * g = merged; g; g = g->next)
+#elif dimension == 3
+  shader = str_append (shader,
+		       "if (point.i < N*Dimensions.x + 2*GHOSTS && "
+		       "point.j < N*Dimensions.y + 2*GHOSTS && "
+		       "point.k < N*Dimensions.z + 2*GHOSTS) {\n");
+  if (loop->vertex)
+    shader = str_append (shader, "  int ig = -1, jg = -1, kg = -1;\n");
+#endif
+  for (const External * g = merged; g; g = g->next) {
+    if (!(g->global || !is_normal_variable (g) || is_external_variable (g)))
+      shader = external_write (shader, g, loop, region, nwg, true);    
     if (g->reduct) {
       shader = str_append (shader, type_string (g), " ",
-                           g->global == 2 ? "_loc_" : "", g->name, " = ",
-                           EXTERNAL_NAME (g), ";\n");
+                           g->global == 2 ? "_loc_" : "", g->name, " = ");
+      if (g->reduct == '+')
+        shader = str_append (shader, "0.;\n");
+      else
+        shader = str_append (shader, g->global ? "_GLOB_VAL_(" : "_LOC_VAL_(", EXTERNAL_NAME (g), ");\n");
       shader = str_append (shader, "const scalar ", g->name, "_out_ = ");
       shader = write_scalar (shader, g->s);
       shader = str_append (shader, ";\n");
     }
-#endif
-  
+  }
   shader = str_append (shader, kernel);
+#if dimension == 2
   shader = str_append (shader, "\nif (point.j - GHOSTS < NY) {");
+#elif dimension == 3
+  shader = str_append (shader, "\nif (point.j - GHOSTS < NY && point.k - GHOSTS < NZ) {");
+#endif
   for (const External * g = merged; g; g = g->next)
     if (g->reduct) {
       shader = str_append (shader, "\n  val_red_(", g->name, "_out_) = ", g->name, ";");
@@ -1543,11 +2133,11 @@ static Shader * compile_shader (ForeachData * loop,
       s.gpu.stored = -1;
     }
   shader = str_append (shader, "\n}",
-		       loop->dirty ? "apply_bc(point);" : "",
+		       loop->dirty ? "apply_bc(_GLOB_ point);" : "",
 		       "}}\n");
 
   if (local) {
-    shader = shader_append_func (shader, loop);
+    shader = shader_append_func (shader, loop, merged);
     shader = str_append (shader, "_loop(");
     local = 1;
     for (const External * g = merged; g; g = g->next)
@@ -1561,7 +2151,7 @@ static Shader * compile_shader (ForeachData * loop,
   if (!s)
     return NULL;
 
-  finalize_shader (s, externals, merged, ng, nwg);
+  finalize_shader (s, externals, merged, ng, nwg, dimension);
   
   return s;
 }
@@ -1593,11 +2183,11 @@ static void gpu_cpu_sync (scalar * list, SyncMode mode, const char * fname, int 
 	fprintf (stderr, "%s:%d: %s ", fname, line,
 		 mode == GPU_READ ? "importing" : "exporting");
 	copy = true;
-	gpu_cpu_sync_scalar (s.i, s.block, grid_data(), mode);
+	gpu_cpu_sync_scalar (s.i, s.block, grid_data(), field_size(), mode);
         fprintf (stderr, "{%s", s.name);
       }
       else {
-	gpu_cpu_sync_scalar (s.i, s.block, grid_data(), mode);
+	gpu_cpu_sync_scalar (s.i, s.block, grid_data(), field_size(), mode);
         fprintf (stderr, ",%s", s.name);
       }
 #else
@@ -1670,6 +2260,10 @@ static Shader * setup_shader (ForeachData * loop, const RegionParameters * regio
     s.boundary_right  = s.boundary[right];
     s.boundary_top    = s.boundary[top];
     s.boundary_bottom = s.boundary[bottom];
+#if dimension == 3
+    s.boundary_front  = s.boundary[front];
+    s.boundary_back   = s.boundary[back];
+#endif
   }
   
   /**
@@ -1716,11 +2310,18 @@ static Shader * setup_shader (ForeachData * loop, const RegionParameters * regio
     if (!(s.stencil.bc & s_centered))
       listc = list_prepend (listc, s);
   scalar * listf_x = NULL, * listf_y = NULL;
+#if dimension == 3
+  scalar * listf_z = NULL;
+#endif
   foreach_dimension()
     for (scalar s in loop->listf.x)
       if (!(s.stencil.bc & s_face))
 	listf_x = list_prepend (listf_x, s);
-  if (listc || listf_x || listf_y) {
+  if (listc || listf_x || listf_y
+#if dimension == 3
+      || listf_z
+#endif
+      ) {
 #if PRINTBC
     fprintf (stderr, "%s:%d: applying BCs for", loop->fname, loop->line);
     for (scalar s in listc)
@@ -1788,22 +2389,31 @@ static bool doloop_on_gpu (ForeachData * loop, const RegionParameters * region,
   for (const External * g = externals; g && g->name; g++)
     if (g->reduct) {
       scalar s = g->s;
+      size_t nb = 1;
+      int * dims = &Dimensions.x;
+      for (int d = 0; d < dimension; d++)
+        nb *= (size_t)(Nl*dims[d] + ((loop->face & (1 << d)) || loop->vertex));
       double result = gpu_reduction (field_offset(s, region->level), g->reduct, region,
                                      gpu_grid->data,
-				     loop->face == 1 ?  (Nl*Dimensions.x + 1)*Nl*Dimensions.y :
-				     loop->face == 2 ?   Nl*Dimensions.x*(Nl*Dimensions.y + 1) :
-				     loop->face == 3 || loop->vertex ?
-				     (Nl*Dimensions.x + 1)*(Nl*Dimensions.y + 1) :
-				     sq(Nl)*Dimensions.x*Dimensions.y);
+				     nb, dimension);
 #if PRINTREDUCT
       fprintf (stderr, "%s:%d: %s %c %g\n",
 	       loop->fname, loop->line, g->name, g->reduct, result);
 #endif
-      if (g->type == sym_DOUBLE) *((double *)g->pointer) = result;
-      else if (g->type == sym_FLOAT) *((float *)g->pointer) = result;
-      else if (g->type == sym_INT) *((int *)g->pointer) = result;
-      else
-	assert (false);
+      if (g->reduct == '+') {
+        if (g->type == sym_DOUBLE) *((double *)g->pointer) += result;
+        else if (g->type == sym_FLOAT) *((float *)g->pointer) += result;
+        else if (g->type == sym_INT) *((int *)g->pointer) += result;
+        else
+          assert (false);
+      }
+      else {
+        if (g->type == sym_DOUBLE) *((double *)g->pointer) = result;
+        else if (g->type == sym_FLOAT) *((float *)g->pointer) = result;
+        else if (g->type == sym_INT) *((int *)g->pointer) = result;
+        else
+          assert (false);
+      }
       delete ({s});
     }
   if (nreductions)
@@ -1822,7 +2432,17 @@ bool gpu_end_stencil (ForeachData * loop,
   if (on_gpu) {
     on_gpu = doloop_on_gpu (loop, region, externals, kernel);
     if (!on_gpu) {
-      fprintf (stderr, "%s:%d: %s: foreach() done on CPU (see GLSL errors above)\n",
+      fprintf (stderr, "%s:%d: %s: foreach() done on CPU (see "
+#if _METAL
+               "Metal"
+#elif _OPENCL
+               "OpenCL"
+#elif _CUDA
+               "CUDA"
+#else
+               "GLSL"
+#endif
+               " errors above)\n",
 	       loop->fname, loop->line, loop->parallel == 3 ? "error" : "warning");
       if (loop->parallel == 3) // must run on GPU but cannot run
 	exit (1);

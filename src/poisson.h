@@ -300,7 +300,11 @@ static void relax (scalar * al, scalar * bl, int l, void * data)
 #if GAUSS_SEIDEL || _GPU
   for (int parity = 0; parity < 2; parity++)
     foreach_level_or_leaf (l, nowarning)
+#if dimension == 2
       if (level == 0 || ((point.i + parity) % 2) != (point.j % 2))
+#elif dimension == 3
+      if (level == 0 || ((point.i + point.j + point.k + parity) % 2))
+#endif
 #else
   foreach_level_or_leaf (l, nowarning)
 #endif
@@ -370,7 +374,7 @@ static double residual (scalar * al, scalar * bl, scalar * resl, void * data)
 #if EMBED
     if (p->embed_flux) {
       double c, e = p->embed_flux (point, a, alpha, &c);
-      res[] += c - e*a[];
+      res[] += c + e*a[];
     }
 #endif // EMBED    
     if (fabs (res[]) > maxres)
@@ -386,7 +390,7 @@ static double residual (scalar * al, scalar * bl, scalar * resl, void * data)
 #if EMBED
     if (p->embed_flux) {
       double c, e = p->embed_flux (point, a, alpha, &c);
-      res[] += c - e*a[];
+      res[] += c + e*a[];
     }
 #endif // EMBED
     if (fabs (res[]) > maxres)

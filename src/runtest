@@ -34,7 +34,7 @@ else
 fi
 
 case $CC in
-    *-D_MPI=*) test -z "$EXEC" && EXEC="mpirun -np "`echo $CC | sed 's/.*-D_MPI=\([0-9]*\).*/\1/'`;
+    *-D_MPI=*) test -z "$EXEC" && EXEC="mpirun --oversubscribe -np "`echo $CC | sed 's/.*-D_MPI=\([0-9]*\).*/\1/'`;
 esac
 
 for opt in $CFLAGS; do
@@ -66,13 +66,13 @@ script()
     rm -f $log log-* stencil stencil-* fine fine-* coarse coarse-*
     case $OSTYPE in
 	*darwin*)
-	    (tail -F display.html 2> /dev/null | grep -o 'http://.*:[0-9]*') &
+	    (tail -F display.html 2> /dev/null | grep -o 'https://.*%20[0-9]*') &
 	    retail1=$!
 	    (tail -F $log 2> /dev/null | grep -E '.*:[0-9]*:.*(warning|error).*:') &
 	    retail2=$!	    
 	    ;;
 	*)
-	    tail -f --pid=$$ --retry display.html 2> /dev/null | grep -o 'http://.*:[0-9]*' &
+	    tail -f --pid=$$ --retry display.html 2> /dev/null | grep -o 'https://.*%20[0-9]*' &
 	    tail -f --pid=$$ --retry $log 2> /dev/null | grep -E '.*:[0-9]*:.*(warning|error).*:' &
 	    retail=$!
 	    ;;
@@ -235,7 +235,7 @@ remotely()
     esac
     PCFLAGS=`echo $CFLAGS | sed -e 's/-grid=[^-]*//g' -e 's/-cadna//g' -e 's/-progress//g' -e 's/-Wdimensions//g' -e 's/-disable-dimensions//g' -e 's/-cpu//g' -e 's/-gpu//g'`
     NCORES=`echo $EXEC | awk 'BEGIN{ np = 1 }{
-      if ($1 == "mpirun") np = $3; }END{ print np;}'`
+      if ($1 == "mpirun") np = $NF; }END{ print np;}'`
     case "$CFLAGS" in
 	*-fopenmp*)
 	    NCORES=8

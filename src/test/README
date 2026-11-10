@@ -64,6 +64,7 @@ Note that only the documented test cases appear in the list below
 * [Typical (1D) tsunami wave](tsunami.c)
 * [3D meniscus](meniscus3D.c)
 * [Dispersion relation of gravito-capillary waves](dispersion_gravitocap.c)
+* [Viscous dissipation of a linear wave](viscous.c)
 
 ## Coriolis
 
@@ -142,6 +143,7 @@ These tests can be run using `make embed-tests`.
 * [Hydrostatic balance with refined embedded boundaries](hydrostatic2.c)
 * [Hydrostatic balance with refined embedded boundaries in 3D](hydrostatic3.c)
 * [Compatibility of embedded boundaries, axi and VOF](missing_metric.c)
+* [Developping axisymmetric pipe flow with embedded boundaries](pipe-axi-embed.c)
 
 ### Stokes
 
@@ -197,14 +199,18 @@ These tests can be run using `make embed-tests`.
 * [Boundary conditions for face fluxes](mpi-flux.c)
 * [Boundary conditions for face vector fields](mpi-interpu.c)
 * [Simple test of Basilisk View](view.c)
+* [Rotation of a circular interface - manual MPI Load Balancing test](balance-rotate.c)
+* [Rotation of a circular interface - automatic MPI Load Balancing test](balance-rotate-auto.c)
 
 ## GPU tests
 
 These tests can be run manually using:
 
 ~~~bash
-make -k gpu-tests
+make -k gpu-tests cuda-tests hip-tests ocl-tests metal-tests
 ~~~
+
+(`metal-tests` is for macOS, see the [Metal backend](/src/grid/metal/metal.c).)
 
 * [A range of GPU tests](gpu.c)
 * [Layers](layers.c)

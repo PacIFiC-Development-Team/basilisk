@@ -1,6 +1,8 @@
 all: check 3D-tests mpi-tests load-balancing curvature-tests	\
 	axi-tests cadna-tests embed-tests multilayer-tests	\
-	multilayer-stratified gotm-tests dimensions-tests gpu-tests
+	multilayer-stratified gotm-tests dimensions-tests       \
+	gpu-tests cuda-tests hip-tests ocl-tests                \
+	gpu3D-tests cuda3D-tests hip3D-tests ocl3D-tests
 
 failed:
 	$(MAKE) -k `find . -name fail | sed -e 's|\./||g' -e 's|/fail|.tst|g'`
@@ -512,13 +514,19 @@ gfsi.tst: gfs.tst gfsi.gfs
 # load-balancing
 
 load-balancing: balance5.tst balance6.tst balance7.tst \
-		bump2Dp.tst bump2Dp-restore.tst vortex.tst axiadvection.tst
+		bump2Dp.tst bump2Dp-restore.tst vortex.tst axiadvection.tst \
+		balance-rotate.tst balance-rotate-auto.tst
 
 balance5.tst: CC = mpicc -D_MPI=9
 balance6.c: balance5.c
 	ln -sf balance5.c balance6.c
 balance6.tst: CC = mpicc -D_MPI=17
 balance7.tst: CC = mpicc -D_MPI=17
+balance-rotate.tst: CC = mpicc -D_MPI=5
+balance-rotate-auto.c: balance-rotate.c
+	ln -sf balance-rotate.c balance-rotate-auto.c
+balance-rotate-auto.tst: CC = mpicc -D_MPI=5
+balance-rotate-auto.tst: CFLAGS += -DLB_AUTO=1
 
 # MPI-parallel multigrid
 
@@ -565,7 +573,7 @@ embed-tests: neumann.tst dirichlet.tst poiseuille45.tst \
 	couette.tst wannier.tst hydrostatic2.tst cylinders.tst \
 	porous.tst porous1.tst uf.tst starting.tst \
 	neumann3D.tst dirichlet3D.tst hydrostatic3.tst spheres.tst \
-        neumann-axi.tst dirichlet-axi.tst
+        neumann-axi.tst dirichlet-axi.tst pipe-axi-embed.tst
 
 # General Ocean Turbulence Model (GOTM) tests
 
@@ -615,12 +623,47 @@ rising-clsvof.gpu.tst: CFLAGS += -DLEVELSET=1 -DCLSVOF=1
 
 # GPUs (CUDA)
 cuda-tests: gpu.cuda.tst gpu-reduce.cuda.tst restriction1.cuda.tst gpu-boundary.cuda.tst \
-	 bump2D-gpu.cuda.tst advection.cuda.tst
+	 layers.cuda.tst bump2D-gpu.cuda.tst advection.cuda.tst reversed.cuda.tst
 cuda-tests: CFLAGS += -DPRINTNSHADERS
 
 # GPUs (HIP)
 hip-tests: gpu.hip.tst gpu-reduce.hip.tst restriction1.hip.tst gpu-boundary.hip.tst \
-	 bump2D-gpu.hip.tst advection.hip.tst
+	 layers.hip.tst bump2D-gpu.hip.tst advection.hip.tst reversed.hip.tst
 hip-tests: CFLAGS += -DPRINTNSHADERS
+
+# GPUs (OpenCL)
+ocl-tests: gpu.ocl.tst gpu-reduce.ocl.tst restriction1.ocl.tst gpu-boundary.ocl.tst \
+	 layers.ocl.tst bump2D-gpu.ocl.tst advection.ocl.tst reversed.ocl.tst
+ocl-tests: CFLAGS += -DPRINTNSHADERS
+
+# GPUs (Metal, macOS)
+metal-tests: gpu.metal.tst gpu-reduce.metal.tst restriction1.metal.tst gpu-boundary.metal.tst \
+	 layers.metal.tst bump2D-gpu.metal.tst advection.metal.tst reversed.metal.tst
+metal-tests: CFLAGS += -DPRINTNSHADERS
+
+# GPU 3D tests (GLSL/OpenGL)
+gpu3D-tests: gpu.gpu3D.tst gpu-reduce.gpu3D.tst restriction1.gpu3D.tst gpu-boundary.gpu3D.tst \
+	periodic.gpu3D.tst poisson.gpu3D.tst
+gpu3D-tests: CFLAGS += -DPRINTNSHADERS
+
+# GPU 3D tests (CUDA)
+cuda3D-tests: gpu.cuda3D.tst gpu-reduce.cuda3D.tst restriction1.cuda3D.tst gpu-boundary.cuda3D.tst \
+	periodic.cuda3D.tst poisson.cuda3D.tst
+cuda3D-tests: CFLAGS += -DPRINTNSHADERS
+
+# GPU 3D tests (HIP)
+hip3D-tests: gpu.hip3D.tst gpu-reduce.hip3D.tst restriction1.hip3D.tst gpu-boundary.hip3D.tst \
+	periodic.hip3D.tst poisson.hip3D.tst
+hip3D-tests: CFLAGS += -DPRINTNSHADERS
+
+# GPU 3D tests (OpenCL)
+ocl3D-tests: gpu.ocl3D.tst gpu-reduce.ocl3D.tst restriction1.ocl3D.tst gpu-boundary.ocl3D.tst \
+	periodic.ocl3D.tst poisson.ocl3D.tst
+ocl3D-tests: CFLAGS += -DPRINTNSHADERS
+
+# GPU 3D tests (Metal, macOS)
+metal3D-tests: gpu.metal3D.tst gpu-reduce.metal3D.tst restriction1.metal3D.tst gpu-boundary.metal3D.tst \
+	periodic.metal3D.tst poisson.metal3D.tst
+metal3D-tests: CFLAGS += -DPRINTNSHADERS
 
 include ../Makefile.defs
