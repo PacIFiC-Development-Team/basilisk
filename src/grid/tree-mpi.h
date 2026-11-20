@@ -1126,6 +1126,10 @@ void mpi_boundary_update_buffers()
   if (npe() == 1)
     return;
 
+  bool forest = tree_number_of_roots () != 1;
+  if (forest)
+    sync_level0_root_pids();
+
   prof_start ("mpi_boundary_update_buffers");
 
   MpiBoundary * m = (MpiBoundary *) mpi_boundary;
@@ -1139,10 +1143,7 @@ void mpi_boundary_update_buffers()
   
   static const unsigned short used = 1 << user;
 
-  bool forest = tree_number_of_roots () != 1;
-
   if (forest) {
-    sync_level0_root_pids();
     foreach_cell() {
       request_level0_root_neighbors (point, mpi_level_root, restriction, used);
       if (is_leaf(cell))
@@ -1371,7 +1372,7 @@ void mpi_boundary_refine (scalar * list)
   if (rerefined.n)
     mpi_boundary_refine (list);
   for (scalar s in list)
-    s.dirty = true;
+    set_dirty_stencil (s);
 }
 
 static void check_depth()
@@ -1720,8 +1721,13 @@ void restore_mpi (FILE * fp, scalar * list1)
 
   flag_border_cells();
 
-  mpi_boundary_update (list);
+  scalar * clean = NULL;
+  for (scalar s in list)
+    if (s.i != INT_MAX)
+      clean = list_append (clean, s);
   free (list);
+  mpi_boundary_update (clean);
+  free (clean);
 }
 
 /**

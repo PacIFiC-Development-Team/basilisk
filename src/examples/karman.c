@@ -71,20 +71,43 @@ p[right]   = dirichlet(0.);
 pf[right]  = dirichlet(0.);
 
 /**
-The top and bottom walls are free-slip and the cylinder is no-slip. */
+The cylinder is no-slip. */
 
-u.n[embed] = fabs(y) > 0.25 ? neumann(0.) : dirichlet(0.);
-u.t[embed] = fabs(y) > 0.25 ? neumann(0.) : dirichlet(0.);
+u.n[embed] = dirichlet(0.);
+u.t[embed] = dirichlet(0.);
 
 event init (t = 0)
 {
 
   /**
-  The domain is the intersection of a channel of width unity and a
-  circle of diameter 0.125. */
+  Here we give two examples of how a default display can be
+  setup. Either by loading the file `karman.gv` which contains drawing
+  calls (the first option, commented out), or directly adding
+  commands. See also the [display.h](/src/display.h#default-display)
+  documentation. */
 
-  solid (cs, fs, intersection (intersection (0.5 - y, 0.5 + y),
-			       sqrt(sq(x) + sq(y)) - D/2.));
+  // display ("karman.gv", true);
+  display() {
+    clear();
+    view (tx = -0.0903593, tz = -0.405391, width = 1070, height = 614);
+    squares (color = "u.y", spread = -1);
+    box ();
+    vectors (u = "u", scale = 0.005);
+    draw_vof (c = "cs", s = "fs", filled = -1, fc = {0.370656,0.370656,0.370656});
+  }
+
+  /**
+  We can also optionaly (removing `&& 0`) directly start the
+  visualisation, also using the `karman.gv` drawing calls. */
+  
+#if DISPLAY && 0
+  system ("gview-gui -g karman.gv &");
+#endif
+  
+  /**
+  The domain contains a cylinder of diameter 0.125. */
+
+  solid (cs, fs, sqrt(sq(x) + sq(y)) - D/2.);
 
   /**
   We set the initial velocity field. */
@@ -120,7 +143,7 @@ We adapt according to the error on the embedded geometry, velocity and
 tracer fields. */
 
 event adapt (i++) {
-  adapt_wavelet ({cs,u,f}, (double[]){1e-2,3e-2,3e-2,3e-2}, maxlevel, 4);
+  adapt_wavelet ({cs,u,f}, {1e-2,3e-2,3e-2,3e-2}, maxlevel, 4);
 }
 
 /**

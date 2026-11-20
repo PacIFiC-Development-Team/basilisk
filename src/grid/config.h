@@ -375,6 +375,10 @@ static void trace_off()
 
 // OpenMP / MPI
   
+#if _MPI
+static double mpi_time = 0.; // accumulated by prof_start()/prof_stop()
+#endif
+
 #if _OPENMP
 
 @define tid() omp_get_thread_num()
@@ -409,15 +413,16 @@ trace
 int mpi_all_reduce0 (void *sendbuf, void *recvbuf, int count,
 		     MPI_Datatype datatype, MPI_Op op, MPI_Comm comm)
 {
-  return MPI_Allreduce (sendbuf, recvbuf, count, datatype, op, comm);
+  prof_start ("mpi_all_reduce");
+  int ret = MPI_Allreduce (sendbuf, recvbuf, count, datatype, op, comm);
+  prof_stop();
+  return ret;
 }
 
 @def mpi_all_reduce(v,type,op) {
-  prof_start ("mpi_all_reduce");
   union { int a; float b; double c;} global;
   mpi_all_reduce0 (&(v), &global, 1, type, op, MPI_COMM_WORLD);
   memcpy (&(v), &global, sizeof (v));
-  prof_stop();
 }
 @
 
@@ -447,7 +452,7 @@ void mpi_all_reduce_array (void * v, MPI_Datatype datatype, MPI_Op op, int elem)
   free (global), free (tmp);
 }
 
-static void * mpi_sum_reduce_init0 (void * v, MPI_Datatype datatype, MPI_Op op, int elem)
+void * mpi_sum_reduce_init0 (void * v, MPI_Datatype datatype, MPI_Op op, int elem)
 {
   size_t size = mpi_data_type_size (datatype);
   void * s = malloc (elem*size);

@@ -26,13 +26,14 @@ darcs clone https://basilisk.fr/basilisk
 If later you want to update the source code, you just need to do
 
 ~~~bash
-cd basilisk
+cd basilisk/src
 darcs pull
 ~~~
 
 and recompile using
 
 ~~~bash
+touch qcc
 make -k clean
 make
 ~~~
@@ -62,6 +63,7 @@ If you are using gcc on a UNIX-like system, this should work:
 ~~~bash
 cd basilisk/src
 ln -s config.gcc config
+make -k
 make
 ~~~
 
@@ -75,6 +77,7 @@ looks close to yours, then try
 cd basilisk/src
 ls config.*
 cp config.[your pick] config
+make -k
 make
 ~~~
 
@@ -92,7 +95,7 @@ either edit `$HOME/.bashrc` manually or do
 ~~~bash
 cd basilisk/src
 echo "export BASILISK=$PWD" >> ~/.bashrc
-echo 'export PATH=$PATH:$BASILISK' >> ~/.bashrc
+echo 'export PATH=$PATH:$BASILISK:$BASILISK/gview' >> ~/.bashrc
 ~~~
 
 # Useful additional packages
@@ -133,15 +136,6 @@ which require additional installation are
 
 * [GOTM for the layered solver](/src/gotm/common.h)
 * [CVMix for the layered solver](/src/cvmix/cvmix.h)
-* [PPR remapping for the layered solver](/src/ppr/Makefile)
-
-This depends on a Fortran compiler, just do
-
-~~~bash
-sudo apt install gfortran
-cd $BASILISK/ppr
-make
-~~~
 
 # Getting started
 

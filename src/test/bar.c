@@ -35,6 +35,7 @@ int main() {
   nl = 2;  
   breaking = 0.1;
   CFL_H = 0.5;
+  cell_lim = mono_limit;
 #endif
   run();
 }
@@ -126,7 +127,7 @@ This optionally displays consistency between `res_eta` and `deta`
 #endif
 
 event gnuplot (t = end) {
-  FILE * fp = popen ("gnuplot", "w");
+  FILE * fp = popen ("gnuplot 2> /dev/null", "w");
   fprintf (fp,
            "set term pngcairo enhanced size 640,200 font \",8\"\n"
            "set output 'snapshot.png'\n");

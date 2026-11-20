@@ -91,7 +91,7 @@ static void * snd_x (int i, int dst, int tag, int level, scalar * list,
   for (scalar s in list)
     size += s.block;
   size *= pow((1 << level) + 2*GHOSTS, dimension - 1)*GHOSTS*sizeof(real);
-  double * buf = (double *) malloc (size), * b = buf;
+  real * buf = (real *) malloc (size), * b = buf;
   foreach_slice_x (i, i + GHOSTS, level)
     for (scalar s in list)
       for (scalar sb = s; sb.i < s.i + s.block; sb.i++, b++)
@@ -109,7 +109,7 @@ static void rcv_x (int i, int src, int tag, int level, scalar * list)
   for (scalar s in list)
     size += s.block;
   size *= pow((1 << level) + 2*GHOSTS, dimension - 1)*GHOSTS*sizeof(real);
-  double * buf = (double *) malloc (size), * b = buf;
+  real * buf = (real *) malloc (size), * b = buf;
   MPI_Status s;
   MPI_Recv (buf, size, MPI_BYTE, src, tag, MPI_COMM_WORLD, &s);
   foreach_slice_x (i, i + GHOSTS, level)
@@ -232,9 +232,9 @@ double z_indexing (scalar index, bool leaves)
 {
   long i;
   if (leaves)
-    i = pid()*(1 << dimension*depth());
+    i = pid()*(1L << (dimension*depth()));
   else
-    i = pid()*((1 << dimension*(depth() + 1)) - 1)/((1 << dimension) - 1);
+    i = pid()*((1L << (dimension*(depth() + 1))) - 1)/((1L << dimension) - 1);
   foreach_cell() {
     if (!leaves || is_leaf(cell))
       index[] = i++;

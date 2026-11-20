@@ -485,7 +485,9 @@ macro2 foreach_leaf() {
 }
 
 #if dimension == 1
-macro2 foreach_cell_restore(ivec d = Dimensions, int rootlevel = 0) {
+macro2 foreach_cell_restore (ivec d = Dimensions, int rootlevel = 0)
+{
+  if (!d.x) d.x = 1;
   for (int ox = 0; ox < d.x; ox++) {
     Point root = {GHOSTS + ox, rootlevel};
     foreach_cell_root(root)
@@ -495,7 +497,10 @@ macro2 foreach_cell_restore(ivec d = Dimensions, int rootlevel = 0) {
   }
 }
 #elif dimension == 2
-macro2 foreach_cell_restore(ivec d = Dimensions, int rootlevel = 0) {
+macro2 foreach_cell_restore (ivec d = Dimensions, int rootlevel = 0)
+{
+  if (!d.x) d.x = 1;
+  if (!d.y) d.y = 1;
   for (int ox = 0; ox < d.x; ox++)
     for (int oy = 0; oy < d.y; oy++) {
       Point root = {GHOSTS + ox, GHOSTS + oy, rootlevel};
@@ -506,7 +511,11 @@ macro2 foreach_cell_restore(ivec d = Dimensions, int rootlevel = 0) {
     }
 }
 #elif dimension == 3
-macro2 foreach_cell_restore(ivec d = Dimensions, int rootlevel = 0) {
+macro2 foreach_cell_restore (ivec d = Dimensions, int rootlevel = 0)
+{
+  if (!d.x) d.x = 1;
+  if (!d.y) d.y = 1;
+  if (!d.z) d.z = 1;
   for (int ox = 0; ox < d.x; ox++)
     for (int oy = 0; oy < d.y; oy++)
       for (int oz = 0; oz < d.z; oz++) {

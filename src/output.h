@@ -323,7 +323,8 @@ Color colormap_color (double cmap[NCMAP][3],
     i = val*(NCMAP - 1);
     coef = val*(NCMAP - 1) - i;
   }
-  assert (i >= 0 && i < NCMAP - 1);
+  if (i < 0 || i >= NCMAP - 1)
+    return (Color){99,55,43}; // brown is an error
   unsigned char * c1 = (unsigned char *) &c;
   for (int j = 0; j < 3; j++)
     c1[j] = 255*(cmap[i][j]*(1. - coef) + cmap[i + 1][j]*coef);
@@ -337,7 +338,7 @@ The open_image()/close_image() functions use pipes to convert PPM
 images to other formats, including `.mp4`, `.ogv` and `.gif`
 animations.
 
-The functions check whether the 'ffmpeg' or 'convert' executables are
+The functions check whether the 'ffmpeg' or 'magick' executables are
 accessible, if they are not the conversion is disabled and the raw PPM
 images are saved. An extra ".ppm" extension is added to the file name
 to indicate that this happened. */
@@ -473,25 +474,28 @@ FILE * open_image (const char * file, const char * options)
     return open_image_data.fp[open_image_data.n - 1] = popen (command, "w");
   }
   else { // !animation
-    static int has_convert = -1;
-    if (has_convert < 0) {
-      if (which ("convert"))
-	has_convert = true;
+    static int imagemagick = -1;
+    if (imagemagick < 0) {
+      if (which ("magick"))
+	imagemagick = 7;
+      else if (which ("convert"))
+	imagemagick = 6;
       else {
 	fprintf (ferr,
-		 "src/output.h:%d: warning: cannot find 'convert'\n"
+		 "src/output.h:%d: warning: cannot find 'magick' or 'convert'\n"
 		 "src/output.h:%d: warning: falling back to raw PPM outputs\n",
 		 LINENO, LINENO);
-	has_convert = false;
+	imagemagick = 0;
       }
     }
-    if (!has_convert)
+    if (!imagemagick)
       return ppm_fallback (file, "w");
-    
-    int len = strlen ("convert ppm:-   ") + strlen (file) +
+    const char * converter = imagemagick == 7 ? "magick" : "convert";
+    int len = strlen (converter) + strlen (" ppm:-   ") + strlen (file) +
       (options ? strlen (options) : 0);
     char command[len];
-    strcpy (command, "convert ppm:- ");
+    strcpy (command, converter);
+    strcat (command, " ppm:- ");
     if (options) {
       strcat (command, options);
       strcat (command, " ");
@@ -510,7 +514,7 @@ void close_image (const char * file, FILE * fp)
       fclose (fp);
   }
 @if !__EMSCRIPTEN__
-  else if (which ("convert"))
+  else if (which ("magick") || which ("convert"))
     pclose (fp);
 @endif // !__EMSCRIPTEN__
   else
@@ -577,10 +581,10 @@ first-order.
 of the domain for which *mask* is negative. 
 
 *map*
-: the colormap: *jet*, *cool_warm* or *gray*. Default is *jet*.
+: the colormap: *jet*, *cool_warm*, *gray*, *blue_white_red* etc. Default is *jet*.
 
 *opt*
-: options to pass to 'convert' or to the 'ppm2???' scripts (used
+: options to pass to 'magick' or to the 'ppm2???' scripts (used
 with *file*).
 
 *fps*
@@ -1109,8 +1113,8 @@ void dump (const char * file = "dump",
   subtree_size (size, false);
 #if _GPU
   for (scalar s in slist)
-    s.input = 1;
-  gpu_cpu_sync (slist, GL_MAP_READ_BIT, __FILE__, LINENO);
+    s.stencil.io |= s_input;
+  gpu_cpu_sync (slist, GPU_READ, __FILE__, LINENO);
 #endif // _GPU
   foreach_cell() {
     unsigned flags = is_leaf(cell) ? leaf : 0;
@@ -1160,11 +1164,9 @@ void dump (const char * file = "dump",
   scalar * slist = list_concat ({size}, dlist); free (dlist);
   struct DumpHeader header = { t, list_len(slist), iter, depth(), npe(),
 			       dump_version };
-
-#if MULTIGRID_MPI || TREE
   foreach_dimension()
     header.n.x = Dimensions.x;
-#endif
+
 #if MULTIGRID_MPI
   MPI_Barrier (MPI_COMM_WORLD);
 #endif
@@ -1193,7 +1195,7 @@ void dump (const char * file = "dump",
   
   index = new scalar;
   z_indexing (index, false);
-  int cell_size = sizeof(unsigned) + header.len*sizeof(double);
+  long cell_size = sizeof(unsigned) + header.len*sizeof(double);
   long pos = -1;
   
   subtree_size (size, false);
@@ -1225,6 +1227,7 @@ void dump (const char * file = "dump",
   MPI_Barrier (MPI_COMM_WORLD);
   if (!unbuffered && pid() == 0)
     rename (name, file);
+  MPI_Barrier (MPI_COMM_WORLD);
 }
 #endif // _MPI
 
@@ -1344,8 +1347,8 @@ bool restore (const char * file = "dump",
 
 #if MULTIGRID_MPI
   long cell_size = sizeof(unsigned) + header.len*sizeof(double);
-  long offset = pid()*((1 << dimension*(header.depth + 1)) - 1)/
-    ((1 << dimension) - 1)*cell_size;
+  long offset = pid()*((1L << dimension*(header.depth + 1)) - 1)/
+    ((1L << dimension) - 1)*cell_size;
   if (fseek (fp, offset, SEEK_CUR) < 0) {
     perror ("restore(): error while seeking");
     exit (1);
@@ -1394,7 +1397,7 @@ bool restore (const char * file = "dump",
       s.gpu.stored = 1; // stored on CPU
 #endif // _GPU
   for (scalar s in all)
-    s.dirty = true;
+    set_dirty_stencil (s);
 #endif // ! (TREE && _MPI)
   
   scalar * other = NULL;
@@ -1422,6 +1425,6 @@ bool restore (const char * file = "dump",
 
 #endif // MULTIGRID
 
-#if _GPU
+#if _GPU && !_CUDA
 # include "grid/gpu/output.h"
 #endif

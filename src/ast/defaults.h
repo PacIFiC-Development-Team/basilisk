@@ -51,6 +51,7 @@ typedef unsigned int uint32_t;
 typedef long int64_t;
 typedef unsigned long uint64_t;
 typedef double time_t;
+typedef void pthread_t;
 
 /**
 ## Tricks for AST
@@ -65,9 +66,9 @@ enum AstBoolean { false, true };
 
 Need to know about these implicitly declared variables/macros. */
 
-int BGHOSTS, o_stencil;
-double HUGE;
-void * NULL;
+const int BGHOSTS, o_stencil;
+const double HUGE;
+const void * NULL;
 
 /**
 # Functions supported by GLSL */

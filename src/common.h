@@ -15,6 +15,7 @@ macro number clamp (number x, number a, number b) {
 }
 
 #define swap(type,a,b) do { type _tmp_ = a; a = b; b = _tmp_; } while(false)
+#define device_synchronize()
 
 #include "grid/config.h"
 
@@ -144,9 +145,11 @@ typedef struct {
 #endif
 } ivec;
 typedef double (* BoundaryFunc) (Point, Point, scalar, bool *);
+typedef void (* BoundaryStencilFunc) (Point, Point, scalar, void *);
 typedef struct {
   BoundaryFunc * boundary;
   BoundaryFunc * boundary_homogeneous;
+  BoundaryStencilFunc * boundary_stencil;
   double (* gradient)              (double, double, double);
   void   (* delete)                (scalar);
   char * name;
@@ -351,10 +354,6 @@ void   (* scalar_clone)       (scalar, scalar);
 
 // timers
 
-#if _MPI
-static double mpi_time = 0.;
-#endif
-
 typedef struct {
   clock_t c;
   struct timeval tv;
@@ -404,16 +403,30 @@ const scalar zeroc[] = 0.;
 
 // matrices
 
-void * matrix_new (int n, int p, size_t size)
+void matrix_inverse3 (double m[3][3])
 {
-  void ** m = qmalloc (n, void *);
-  char * a = qmalloc (n*p*size, char);
-  for (int i = 0; i < n; i++)
-    m[i] = a + i*p*size;
-  return m;
+  double det = (m[0][0]*(m[1][1]*m[2][2] - m[2][1]*m[1][2]) - 
+		m[0][1]*(m[1][0]*m[2][2] - m[2][0]*m[1][2]) + 
+		m[0][2]*(m[1][0]*m[2][1] - m[2][0]*m[1][1]));
+  assert (det);
+  double m00 = m[0][0];
+  m[0][0] = (m[1][1]*m[2][2] - m[1][2]*m[2][1])/det;
+  double m01 = m[0][1];
+  m[0][1] = (m[2][1]*m[0][2] - m[0][1]*m[2][2])/det;
+  double m02 = m[0][2];
+  m[0][2] = (m01*m[1][2] - m[1][1]*m[0][2])/det;
+  double m10 = m[1][0];
+  m[1][0] = (m[1][2]*m[2][0] - m[1][0]*m[2][2])/det;
+  double m11 = m[1][1];
+  m[1][1] = (m00*m[2][2] - m[2][0]*m02)/det;
+  m[1][2] = (m10*m02 - m00*m[1][2])/det;
+  double m20 = m[2][0];
+  m[2][0] = (m10*m[2][1] - m[2][0]*m11)/det;
+  m[2][1] = (m20*m01 - m00*m[2][1])/det; 
+  m[2][2] = (m00*m11 - m01*m10)/det;
 }
 
-double matrix_inverse (double ** m, int n, double pivmin)
+double smatrix_inverse (const int n, double m[n][n], double pivmin)
 {
   int indxc[n], indxr[n], ipiv[n];
   int i, icol = 0, irow = 0, j, k, l, ll;
@@ -441,10 +454,10 @@ double matrix_inverse (double ** m, int n, double pivmin)
 	swap (double, m[irow][l], m[icol][l]);
     indxr[i] = irow;
     indxc[i] = icol;
-    if (fabs (m[icol][icol]) <= pivmin)
-      return 0.;
     if (fabs (m[icol][icol]) < minpiv)
       minpiv = fabs (m[icol][icol]);
+    if (minpiv < pivmin)
+      break;
     pivinv = 1.0/m[icol][icol];
     m[icol][icol] = 1.0;
     for (l = 0; l < n; l++) m[icol][l] *= pivinv;
@@ -456,12 +469,27 @@ double matrix_inverse (double ** m, int n, double pivmin)
 	  m[ll][l] -= m[icol][l]*dum;
       }
   }
-  for (l = n - 1; l >= 0; l--) {
-    if (indxr[l] != indxc[l])
-      for (k = 0; k < n; k++)
-	swap (double, m[k][indxr[l]], m[k][indxc[l]]);
-  }
-  return minpiv;
+  if (minpiv >= pivmin)
+    for (l = n - 1; l >= 0; l--) {
+      if (indxr[l] != indxc[l])
+        for (k = 0; k < n; k++)
+          swap (double, m[k][indxr[l]], m[k][indxc[l]]);
+    }
+  return minpiv < pivmin ? 0. : minpiv;
+}
+
+void * matrix_new (int n, int p, size_t size)
+{
+  void ** m = qmalloc (n, void *);
+  char * a = qmalloc (n*p*size, char);
+  for (int i = 0; i < n; i++)
+    m[i] = a + i*p*size;
+  return m;
+}
+
+double matrix_inverse (double ** m, int n, double pivmin)
+{
+  return smatrix_inverse (n, (double (*)[n])m[0], pivmin);
 }
 
 void matrix_free (void * m)
@@ -491,15 +519,42 @@ static void free_display_defaults() {
   free (display_defaults);
 }
 
-void display (const char * commands, bool overwrite = false)
+static
+void display_internal (const char * command, bool overwrite)
 {
   if (display_defaults == NULL)
     free_solver_func_add (free_display_defaults);
+  char * commands;
+  if (strcmp (command + strlen(command) - 3, ".gv"))
+    commands = strdup (command);
+  else {
+    FILE * fp = fopen (command, "r");
+    if (!fp) {
+      perror (command);
+      exit (1);
+    }
+    fseek (fp, 0, SEEK_END);
+    long size = ftell (fp);
+    rewind (fp);
+    commands = malloc (size + 1);
+    if (!commands) {
+      fclose (fp);
+      fprintf (stderr, "%s:%d: could not allocate %ld bytes\n", __FILE__, LINENO, size + 1);
+      exit (1);
+    }
+    if (fread (commands, 1, size, fp) != (size_t) size) {
+      fprintf (stderr, "%s:%d: could not read %ld bytes\n", __FILE__, LINENO, size);
+      free (commands);
+      fclose (fp);
+      exit (1);
+    }
+    commands[size] = '\0';
+    fclose (fp);
+  }
   if (overwrite) {
     free (display_defaults);
     display_defaults = malloc (strlen(commands) + 2);
     strcpy (display_defaults, "@");
-    strcat (display_defaults, commands);
   }
   else {
     if (!display_defaults)
@@ -507,8 +562,37 @@ void display (const char * commands, bool overwrite = false)
     display_defaults =
       realloc (display_defaults,
 	       strlen(display_defaults) + strlen(commands) + 1);
-    strcat (display_defaults, commands);
   }
+  char * s = commands, * defaults = display_defaults;
+  while (*s != '\0') {
+    while (*s != '\0' && strchr (" \t\n", *s)) s++;
+    char * end = s; while (*end != '\0' && !strchr (";\n", *end)) end++;
+    char c = *end != '\0' ? *(end + 1) : '\0';
+    if (*end == '\n') *end = ' ';
+    if (*end != '\0') *(end + 1) = '\0';
+    if (!strncmp (s, "clear", 5)) {
+      char * s1 = s + 5; while (strchr (" \t", *s1)) s1++;
+      if (!strncmp (s1, "();", 3)) {
+        defaults = display_defaults;
+        strcpy (display_defaults, "@");
+        s += strlen (s); *s = c;
+        continue;
+      }
+    }
+    if (s[0] != '\0' && strncmp (s, "//", 2)) {
+      strcat (defaults, s);
+      defaults += strlen (s);
+    }
+    s += strlen (s); *s = c;
+  }
+  free (commands);
+}
+
+macro display (const char * commands = NULL, bool overwrite = false)
+{
+  if (commands)
+    display_internal (commands, overwrite);
+  display_internal ([...], commands == NULL ? overwrite : false);
 }
 
 #define display_control(val, ...)
@@ -553,26 +637,4 @@ OMP(omp declare reduction (+ : mat3 :
 			   omp_out.z.z += omp_in.z.z
 			   ))
 
-typedef struct {
-  uint32_t s;
-} Adler32Hash;
-
-static
-inline void a32_hash_init (Adler32Hash * hash)
-{
-  hash->s = 0;
-}
-
-static
-inline void a32_hash_add (Adler32Hash * hash, const void * data, size_t size)
-{
-  const uint8_t * buffer = (const uint8_t*) data;
-  for (size_t n = 0; n < size; n++, buffer++)
-    hash->s = *buffer + (hash->s << 6) + (hash->s << 16) - hash->s;
-}
-
-static
-inline uint32_t a32_hash (const Adler32Hash * hash)
-{
-  return hash->s;
-}
+#include "a32.h"

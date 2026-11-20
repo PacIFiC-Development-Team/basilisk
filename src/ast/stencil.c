@@ -774,6 +774,15 @@ Ast * calling_foreach (Stack * stack)
 static
 void check_missing_reductions (Ast * n, Stack * stack, Ast * scope)
 {
+  AstTerminal * t = ast_left_terminal (scope);
+  if (scope->sym == sym_function_definition &&
+      !ast_parent (n, sym_function_definition)) {
+    fprintf (stderr,
+	     "%s:%d: error: global variable '%s' is modified by this "
+	     "point function\n",
+	     t->file, t->line, ast_terminal (n)->start);
+    exit (1);
+  }
   Ast * list = ast_find (ast_schema (scope, sym_foreach_statement,
 				     2, sym_argument_expression_list),
 			 sym_reduction_list);
@@ -786,7 +795,6 @@ void check_missing_reductions (Ast * n, Stack * stack, Ast * scope)
 		 ast_terminal (n)->start))
       return;
   }
-  AstTerminal * t = ast_left_terminal (scope);
   if (ast_is_foreach_statement (scope))
     fprintf (stderr,
 	     "%s:%d: error: non-local variable '%s' is modified by "
@@ -1225,6 +1233,18 @@ void set_undefined_parameters (Ast * point_function, const Ast * function_call)
   }
 }
 
+static bool is_global_identifier (const Ast * identifier)
+{
+  if (identifier->sym != sym_IDENTIFIER)
+    return false;
+  Ast * declaration = ast_parent (identifier, sym_declaration);
+  if (declaration)
+    return (declaration->parent->sym == sym_external_declaration);
+  if (ast_parent (identifier, sym_parameter_declaration))
+    return false;
+  return ast_parent (identifier, sym_function_declaration) != NULL;
+}
+
 static void point_function_calls (Ast * n, Stack * stack, void * data)
 {
   Undefined * undef = data;
@@ -1285,7 +1305,38 @@ static void point_function_calls (Ast * n, Stack * stack, void * data)
 
     Ast * new_stencil = ast_copy (function_definition);
     set_undefined_parameters (new_stencil, n);
+
+    /**
+    We get the reference to the function and remove all "local"
+    declarations from the stack, before "calling" the stencil
+    function. */
+    
+    Ast * ref = ast_find (function_definition, sym_direct_declarator,
+                          0, sym_generic_identifier,
+                          0, sym_IDENTIFIER);    
+    Stack * local = NULL;
+    if (ref) {
+      local = stack_new (sizeof (Ast *));
+      Ast ** p;
+      while ((p = stack_pop (stack)) && !is_global_identifier (*p))
+        stack_push (local, p);
+      assert (p);
+      stack_push (local, p);
+    }
+      
     stencil = ast_stencil (new_stencil, undef->parallel, undef->overflow, undef->nowarning);
+
+    /**
+    We restore the local declarations after "returning" from the
+    stencil function. */
+    
+    if (local) {
+      Ast ** p;
+      while ((p = stack_pop (local)))
+        stack_push (stack, p);
+      stack_destroy (local);
+    }
+    
     if (!stencil) {
       ast_destroy (new_stencil);
       ast_erase (n);

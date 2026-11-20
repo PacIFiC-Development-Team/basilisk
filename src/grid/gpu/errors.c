@@ -745,13 +745,14 @@ char *yytext;
 #line 5 "errors.lex"
 
   /**
-  # Error message parsing for compilation of GLSL code on GPUs
+  # Error message parsing for compilation of GLSL or CUDA code on GPUs
   */
   static char * sout;
+  static char * slang;
   static char * fname;
   static int line;
   
-  static char * str_append (char * dst, const char * src) {
+  static char * str_append (char * dst, char * src) {
     if (dst == NULL) {
       dst = malloc (strlen(src) + 1);
       dst[0] = '\0';
@@ -776,7 +777,7 @@ char *yytext;
 
   /* parse Intel GPU error messages of the form:
      0:31(15):... */
-  static int parse_intel (const char * errors, const char ** msg)
+  static int parse_intel (char * errors, char ** msg)
   {
     char * end = strchr (errors, '\n');
     char * sline = strchr (errors, ':');
@@ -791,7 +792,7 @@ char *yytext;
 
   /* parse Nvidia GPU error messages of the form:
      0(31) :... */
-  static int parse_nvidia (const char * errors, const char ** msg)
+  static int parse_nvidia (char * errors, char ** msg)
   {
     char * end = strchr (errors, '\n');
     char * sline = strchr (errors, '(');  
@@ -803,8 +804,23 @@ char *yytext;
     if (!*msg) return -1; (*msg)++;
     return atoi_check (sline, s1);
   }
-
-  static char * next_error (const char * errors, int * line, const char ** msg)
+  
+  /* parse OpenCL error messages of the form:
+     <kernel>:368:78:... */
+  static int parse_opencl (char * errors, char ** msg)
+  {
+    char * end = strchr (errors, '\n');
+    char * sline = strchr (errors, ':');
+    if (!sline) return -1; sline++;
+    if (end && end < sline) return -1;
+    char * s1 = strchr (sline, ':');
+    if (!s1) return -1;
+    *msg = strchr (s1 + 1, ':');
+    if (!*msg) return -1; (*msg)++;
+    return atoi_check (sline, s1);
+  }
+  
+  static char * next_error (char * errors, int * line, char ** msg)
   {
     if (!errors || *errors == '\0')
       return NULL;
@@ -812,6 +828,8 @@ char *yytext;
     *line = parse_intel (errors, msg);
     if (*line < 0)
       *line = parse_nvidia (errors, msg);
+    if (*line < 0)
+      *line = parse_opencl (errors, msg);
     if (*line < 0) {
       // unknown error format: assumes first line
       *line = 1;
@@ -829,22 +847,24 @@ char *yytext;
     return s3;
   }
   
-  static char * merge (const char * source, const char * errors)
+  static char * merge (char * source, char * errors)
   {
     char * merged = NULL;
-    const char * msg;
+    char * msg;
     int eline, line = 1;
     char * error = next_error (errors, &eline, &msg);
     char * src = strdup (source), * s = src;
     while (*s != '\0') {
       if (*s == '\n') {
 	while (error && eline <= line) {
-	  merged = str_append (merged, "@");
-	  if (eline != line)
-	    merged = str_append (merged, "!");
-	  merged = str_append (merged, msg);
-	  merged = str_append (merged, "@");
-	  error = next_error (error, &eline, &msg);
+          if (msg[0] != '\0' && !strstr(msg, "error detected")) {
+            merged = str_append (merged, "@");
+            if (eline != line)
+              merged = str_append (merged, "!");
+            merged = str_append (merged, msg);
+            merged = str_append (merged, "@");
+          }
+          error = next_error (error, &eline, &msg);
 	}
 	line++;
       }
@@ -856,8 +876,8 @@ char *yytext;
     free (src);
     return merged;
   }
-#line 860 "errors.c"
-#line 861 "errors.c"
+#line 880 "errors.c"
+#line 881 "errors.c"
 
 #define INITIAL 0
 
@@ -1077,10 +1097,10 @@ YY_DECL
 		}
 
 	{
-#line 125 "errors.lex"
+#line 145 "errors.lex"
 
 
-#line 1084 "errors.c"
+#line 1104 "errors.c"
 
 	while ( /*CONSTCOND*/1 )		/* loops until end-of-file is reached */
 		{
@@ -1150,7 +1170,7 @@ do_action:	/* This label is used only to access EOF actions. */
 
 case 1:
 YY_RULE_SETUP
-#line 127 "errors.lex"
+#line 147 "errors.lex"
 {
   char * sline = yytext;
   while (!strchr ("0123456789", *sline)) sline++;
@@ -1167,7 +1187,7 @@ YY_RULE_SETUP
 case 2:
 /* rule 2 can match eol */
 YY_RULE_SETUP
-#line 140 "errors.lex"
+#line 160 "errors.lex"
 {
   if (0) // !strncmp (yytext, "@error ", 7))
     yytext += 6;
@@ -1180,7 +1200,9 @@ YY_RULE_SETUP
     char s[81];
     snprintf (s, 80, "%d", line);
     sout = str_append (sout, s);
-    sout = str_append (sout, ": GLSL: ");
+    sout = str_append (sout, ": ");
+    sout = str_append (sout, slang);
+    sout = str_append (sout, ": ");
   }
   *strchr (yytext + 1, '@') = '\0';
   sout = str_append (sout, yytext + 1);
@@ -1190,20 +1212,20 @@ YY_RULE_SETUP
 case 3:
 /* rule 3 can match eol */
 YY_RULE_SETUP
-#line 159 "errors.lex"
+#line 181 "errors.lex"
 { line++; }
 	YY_BREAK
 case 4:
 YY_RULE_SETUP
-#line 161 "errors.lex"
+#line 183 "errors.lex"
 ; // very important!!
 	YY_BREAK
 case 5:
 YY_RULE_SETUP
-#line 163 "errors.lex"
+#line 185 "errors.lex"
 ECHO;
 	YY_BREAK
-#line 1207 "errors.c"
+#line 1229 "errors.c"
 case YY_STATE_EOF(INITIAL):
 	yyterminate();
 
@@ -2222,16 +2244,18 @@ void yyfree (void * ptr )
 
 #define YYTABLES_NAME "yytables"
 
-#line 163 "errors.lex"
+#line 185 "errors.lex"
 
 
-char * gpu_errors (const char * errors, const char * source, char * fout)
+char * gpu_errors (char * errors, char * source, char * fout,
+                   char * lang)
 {
   if (0) yyunput (0, NULL); // just prevents 'yyunput unused' compiler warning
 
   char * merged = merge (source, errors);
   sout = fout;
   sout = str_append (NULL, "");
+  slang = lang;
   YY_BUFFER_STATE buf = yy_scan_string (merged);
   fname = NULL;
   line = 1;

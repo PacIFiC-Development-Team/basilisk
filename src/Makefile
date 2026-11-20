@@ -7,14 +7,16 @@ EXCLUDE = qcc.c include.c postproc.c bview.c
 
 TOPTARGETS = all clean check
 
-SUBDIRS = darcsit ast kdt wsServer gl
+SUBDIRS = darcsit ast kdt wsServer gl grid
 
 .PHONY: subdirs $(SUBDIRS) $(TOPTARGETS)
 
 all: subdirs qcc literatec bview2D bview3D bview2Dm
 	@chmod +x ppm2mpeg ppm2mp4 ppm2ogv ppm2gif runtest page2html
-	@test -f xyz2kdt || ln -s kdt/xyz2kdt
-	@test -f kdtquery || ln -s kdt/kdtquery
+	@test -f xyz2kdt || ln -s -f kdt/xyz2kdt
+	@test -f kdtquery || ln -s -f kdt/kdtquery
+	@test -f gview-gui || ln -s -f gview/gview gview-gui
+	@test -f gview-nogui || ln -s -f gview/gview-nogui gview-nogui
 
 subdirs: $(SUBDIRS)
 
@@ -25,15 +27,15 @@ $(SUBDIRS):
 literatec:
 	cd darcsit && $(MAKE) && cd cgi-bin && $(MAKE)
 
-qcc: qcc.c include.o postproc.o ast/libast.a config ast/ast.h
+qcc: qcc.c paths.c include.o postproc.o ast/libast.a config ast/ast.h
 	$(CC) $(CFLAGS) -DLIBDIR=\"`pwd`\" \
 		-DCC99="\"$(CC99)\"" \
 		-DCPP99="\"$(CPP99)\"" \
 		-DCADNACC="\"$(CADNACC)\"" \
 		-DBASILISK="\"$(BASILISK)\"" \
-		qcc.c include.o postproc.o -o qcc -Last -last -lm
+		qcc.c paths.c include.o postproc.o -o qcc -Last -last -lm -ldl
 
-include.o: include.c
+include.o: include.c include.h
 	$(CC) $(CFLAGS) -DLIBDIR=\"`pwd`\" -c include.c
 
 postproc.o: postproc.c
@@ -54,13 +56,13 @@ postproc.o: postproc.c
 # postproc.c: postproc.lex
 #	flex -P post -o postproc.c postproc.lex
 
-bview2D: bview.c
+bview2D: bview.c display.h view.h draw.h utils.h draw_get.h
 	./qcc $(CFLAGS) -autolink bview.c -o bview2D -lfb_tiny -lm
 
-bview3D: bview.c
+bview3D: bview.c display.h view.h draw.h utils.h draw_get.h
 	./qcc $(CFLAGS) -autolink -grid=octree bview.c -o bview3D -lfb_tiny -lm
 
-bview2Dm: bview.c
+bview2Dm: bview.c display.h view.h draw.h utils.h draw_get.h
 	./qcc $(CFLAGS) -autolink -grid=multigrid bview.c -o bview2Dm -lfb_tiny -lm
 
 alltags:

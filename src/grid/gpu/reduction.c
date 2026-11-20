@@ -1,4 +1,4 @@
-double cpu_reduction (GLuint * src, size_t offset, size_t nb, const char op)
+static double cpu_reduction (GLuint * src, size_t offset, size_t nb, const char op)
 {
   GL_C (glMemoryBarrier (GL_BUFFER_UPDATE_BARRIER_BIT));
   double result;
@@ -38,19 +38,22 @@ double cpu_reduction (GLuint * src, size_t offset, size_t nb, const char op)
   return result;
 }
 
-double gpu_reduction (size_t offset, const char op, const RegionParameters * region, size_t nb)
+double gpu_reduction (size_t offset, const char op, const RegionParameters * region,
+                      GPUData * data, size_t nb, int dim)
 {
   const int stride = 64, nwgr = 64;
-  bool is_foreach_point = (region->n.x == 1 && region->n.y == 1);
+  bool is_foreach_point = (region->n.x == 1 && region->n.y == 1 &&
+			   (dim == 2 || region->n.z == 1));
   if (!is_foreach_point && nb < nwgr*stride)
-    return cpu_reduction (GPUContext.ssbo, offset, nb, op);
-  
-  GLuint * br = gpu_grid->reduct;
+    return cpu_reduction (ssbo, offset, nb, op);
+
+  GLuint * br = data->reduct;
   if (!br[0]) {
     GL_C (glGenBuffers (2, br));
     for (int i = 0; i < 2; i++) {
       GL_C (glBindBuffer (GL_SHADER_STORAGE_BUFFER, br[i]));
-      size_t size = (sq((size_t)N + 1)/stride + 1)*sizeof(real);
+      size_t size = ((dim == 2 ? sq((size_t)N + 1) : cube((size_t)N + 1))
+                                                  /stride + 1)*sizeof(real);
       assert (size < GPUContext.max_ssbo_size); // must fit within a single SSBO
       GL_C (glBufferData (GL_SHADER_STORAGE_BUFFER, size, NULL, GL_DYNAMIC_READ));
     }
@@ -134,14 +137,15 @@ double gpu_reduction (size_t offset, const char op, const RegionParameters * reg
   int start = offset*sizeof(real)/GPUContext.max_ssbo_size;
   offset -= start*GPUContext.max_ssbo_size/sizeof(real);
   for (int i = start; i < GPUContext.nssbo; i++)
-    GL_C (glBindBufferBase (GL_SHADER_STORAGE_BUFFER, 1 + i - start, GPUContext.ssbo[i]));
+    GL_C (glBindBufferBase (GL_SHADER_STORAGE_BUFFER, 1 + i - start, ssbo[i]));
 
   if (is_foreach_point) {
     real result = 0.;
     int i = (region->p.x - X0)/L0*N;
     int j = (region->p.y - Y0)/L0*N;
-    if (i >= 0 && i < N && j >= 0 && j < N) {
-      offset += i*N + j;
+    int k = dim == 3 ? (region->p.z - Z0)/L0*N : 0;
+    if (i >= 0 && i < N && j >= 0 && j < N && (dim == 2 || (k >= 0 && k < N))) {
+      offset += dim == 2 ? i*N + j : (i*N + j)*N + k;
       GL_C (glUniform1ui (loffset, offset));
       GL_C (glBindBufferBase (GL_SHADER_STORAGE_BUFFER, 0, br[0]));
       GL_C (glUniform1ui (lnbr, 1));

@@ -1,15 +1,26 @@
 .PHONY: all clean
 
-CFLAGS += -I.. -O2
+CFLAGS += -I$(BASILISK) -I.. -DSINGLE_PRECISION -O2
 
-all: libgpu.a
+# By default we only make liberrors.a because it does not depend on
+# external libraries, unlike libgpu.a
+
+all: liberrors.a
+
+# these are not Basilisk programs
+EXCLUDE = errors.c  glad.c  opengl.c  reduction.c
 
 # uncomment if errors.lex is modified
 # errors.c: errors.lex
 #	flex -P gpu_errors -o errors.c errors.lex
 
-libgpu.a: errors.o glad.o
-	ar cr libgpu.a errors.o glad.o
+libgpu.a: glad.o opengl.o
+	ar cr libgpu.a glad.o opengl.o
+
+liberrors.a: errors.o
+	ar cr liberrors.a errors.o
+
+opengl.o: backend.h ../externals.h opengl.c reduction.c
 
 check:
 

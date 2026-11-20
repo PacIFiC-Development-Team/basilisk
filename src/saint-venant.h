@@ -380,20 +380,21 @@ event defaults (i = 0)
   
 #if TREE
   for (scalar s in {h,zb,u,eta}) {
-    s.refine = s.prolongation = refine_linear;
-    s.restriction = restriction_volume_average;
-    s.dirty = true;
+    s.refine = refine_linear;
+    set_prolongation (s, refine_linear);
+    set_restriction (s, restriction_volume_average);
   }
   eta.refine  = refine_eta;
-  eta.restriction = restriction_eta;
+  set_restriction (eta, restriction_eta);
   eta.depends = list_copy ({zb,h});
-  eta.dirty = true;
 #endif
 
   /**
   We setup the default display. */
 
-  display ("squares (color = 'h > 0 ? eta : nodata', spread = -1);");
+  display() {
+    squares (color = "h > 0 ? eta : nodata", spread = -1);
+  }
 }
 
 /**
